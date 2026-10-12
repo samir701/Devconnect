@@ -1,0 +1,352 @@
+datasource db {
+  provider     = "mysql"
+  url          = env("DATABASE_URL")
+  relationMode = "prisma"
+}
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+enum UserStatus {
+  AVAILABLE
+  AWAY
+  OFFLINE
+}
+
+enum ProjectStatus {
+  ACTIVE
+  ARCHIVED
+}
+
+enum ProjectRole {
+  OWNER
+  ADMIN
+  DEVELOPER
+  QA
+  VIEWER
+}
+
+enum PriorityLevel {
+  LOW
+  MEDIUM
+  HIGH
+  CRITICAL
+}
+
+enum TaskStatus {
+  TODO
+  IN_PROGRESS
+  REVIEW
+  COMPLETED
+}
+
+enum BugStatus {
+  OPEN
+  INVESTIGATING
+  IN_PROGRESS
+  FIXED
+  CLOSED
+}
+
+enum ConversationType {
+  DIRECT
+  PROJECT_CHANNEL
+}
+
+model User {
+  id          String      @id @default(cuid())
+  email       String      @unique
+  name        String
+  avatarUrl   String?     @db.VarChar(1000)
+  bio         String?     @db.Text
+  headline    String?     @db.VarChar(500) // e.g. "Frontend Developer | AI/ML | Python"
+  skills      String?     @db.Text        // JSON array or comma-separated tags
+  githubUrl   String?     @db.VarChar(500)
+  linkedinUrl String?     @db.VarChar(500)
+  status      UserStatus  @default(AVAILABLE)
+  lastSeen    DateTime?   @default(now())
+  createdAt   DateTime    @default(now())
+  updatedAt   DateTime    @updatedAt
+
+  // Relations
+  ownedProjects            Project[]               @relation("ProjectOwner")
+  memberships              ProjectMember[]
+  conversationMemberships  ConversationMember[]
+  createdTasks             Task[]                  @relation("TaskCreator")
+  assignedTasks            Task[]                  @relation("TaskAssignee")
+  createdBugs              Bug[]                   @relation("BugReporter")
+  assignedBugs             Bug[]                   @relation("BugAssignee")
+  messages                 Message[]               @relation("MessageSender")
+  reactions                MessageReaction[]
+  attachments              Attachment[]            @relation("UserAttachments")
+  activityLogs             ActivityLog[]
+  receivedNotifications    Notification[]          @relation("ReceivedNotifications")
+  sentNotifications        Notification[]          @relation("SentNotifications")
+  notificationPreference   NotificationPreference?
+
+  @@map("users")
+}
+
+model Project {
+  id          String        @id @default(cuid())
+  name        String        @db.VarChar(255)
+  description String?       @db.Text
+  ownerId     String
+  owner       User?         @relation("ProjectOwner", fields: [ownerId], references: [id], onDelete: Cascade)
+  status      ProjectStatus @default(ACTIVE)
+  githubRepo  String?       @db.VarChar(500)
+  channels    String?       @db.Text // JSON string: ["general", "development", "bugs", "tasks", "files", "activity"]
+  createdAt   DateTime      @default(now())
+  updatedAt   DateTime      @updatedAt
+
+  // Relations
+  members       ProjectMember[]
+  conversations Conversation[]
+  tasks         Task[]
+  bugs          Bug[]
+  messages      Message[]
+  attachments   Attachment[]
+  activityLogs  ActivityLog[]
+  notifications Notification[]
+
+  @@index([ownerId])
+  @@map("projects")
+}
+
+model ProjectMember {
+  id        String      @id @default(cuid())
+  projectId String
+  project   Project     @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  userId    String
+  user      User?       @relation(fields: [userId], references: [id], onDelete: Cascade)
+  role      ProjectRole @default(DEVELOPER)
+  joinedAt  DateTime    @default(now())
+
+  @@unique([projectId, userId])
+  @@index([userId])
+  @@index([projectId])
+  @@map("project_members")
+}
+
+model Conversation {
+  id        String           @id @default(cuid())
+  type      ConversationType @default(PROJECT_CHANNEL)
+  projectId String?
+  project   Project?         @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  name      String?          @db.VarChar(100) // e.g. "general", "development", "bugs"
+  createdAt DateTime         @default(now())
+  updatedAt DateTime         @updatedAt
+
+  members  ConversationMember[]
+  messages Message[]
+
+  @@index([projectId])
+  @@map("conversations")
+}
+
+model ConversationMember {
+  id             String       @id @default(cuid())
+  conversationId String
+  conversation   Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  userId         String
+  user           User?        @relation(fields: [userId], references: [id], onDelete: Cascade)
+  joinedAt       DateTime     @default(now())
+  lastReadAt     DateTime?
+
+  @@unique([conversationId, userId])
+  @@index([conversationId])
+  @@index([userId])
+  @@map("conversation_members")
+}
+
+model Message {
+  id               String            @id @default(cuid())
+  conversationId   String?
+  conversation     Conversation?     @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  projectId        String?
+  project          Project?          @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  channel          String?           @default("general")
+  senderId         String
+  sender           User?             @relation("MessageSender", fields: [senderId], references: [id], onDelete: Cascade)
+  content          String            @db.Text
+  messageType      String            @default("TEXT") // TEXT | CODE | BUG | TASK | FILE | SYSTEM
+  metadata         String?           @db.Text
+  replyToMessageId String?
+  replyTo          Message?          @relation("MessageReplies", fields: [replyToMessageId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  replies          Message[]         @relation("MessageReplies")
+  isEdited         Boolean           @default(false)
+  deletedAt        DateTime?
+  createdAt        DateTime          @default(now())
+  updatedAt        DateTime          @updatedAt
+
+  reactions        MessageReaction[]
+  attachments      Attachment[]
+  tasks            Task[]
+  bugs             Bug[]
+
+  @@index([conversationId])
+  @@index([projectId])
+  @@index([senderId])
+  @@index([replyToMessageId])
+  @@map("messages")
+}
+
+model MessageReaction {
+  id        String   @id @default(cuid())
+  messageId String
+  message   Message  @relation(fields: [messageId], references: [id], onDelete: Cascade)
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  emoji     String   @db.VarChar(32)
+  createdAt DateTime @default(now())
+
+  @@unique([messageId, userId, emoji])
+  @@index([messageId])
+  @@index([userId])
+  @@map("message_reactions")
+}
+
+model Task {
+  id          String        @id @default(cuid())
+  projectId   String
+  project     Project       @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  messageId   String?
+  message     Message?      @relation(fields: [messageId], references: [id], onDelete: SetNull)
+  title       String        @db.VarChar(255)
+  description String?       @db.Text
+  priority    PriorityLevel @default(MEDIUM)
+  status      TaskStatus    @default(TODO)
+  assignedTo  String?
+  assignee    User?         @relation("TaskAssignee", fields: [assignedTo], references: [id], onDelete: SetNull)
+  createdBy   String
+  creator     User?         @relation("TaskCreator", fields: [createdBy], references: [id], onDelete: Cascade)
+  dueDate     DateTime?
+  createdAt   DateTime      @default(now())
+  updatedAt   DateTime      @updatedAt
+
+  @@index([projectId])
+  @@index([messageId])
+  @@index([assignedTo])
+  @@index([createdBy])
+  @@map("tasks")
+}
+
+model Bug {
+  id          String        @id @default(cuid())
+  projectId   String
+  project     Project       @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  messageId   String?
+  message     Message?      @relation(fields: [messageId], references: [id], onDelete: SetNull)
+  title       String        @db.VarChar(255)
+  description String?       @db.Text
+  endpoint    String?       @db.VarChar(500)
+  priority    PriorityLevel @default(HIGH)
+  status      BugStatus     @default(OPEN)
+  assignedTo  String?
+  assignee    User?         @relation("BugAssignee", fields: [assignedTo], references: [id], onDelete: SetNull)
+  createdBy   String
+  reporter    User?         @relation("BugReporter", fields: [createdBy], references: [id], onDelete: Cascade)
+  createdAt   DateTime      @default(now())
+  updatedAt   DateTime      @updatedAt
+
+  @@index([projectId])
+  @@index([messageId])
+  @@index([assignedTo])
+  @@index([createdBy])
+  @@map("bugs")
+}
+
+model Attachment {
+  id              String   @id @default(cuid())
+  messageId       String?
+  message         Message? @relation(fields: [messageId], references: [id], onDelete: SetNull)
+  projectId       String?
+  project         Project? @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  uploaderId      String
+  uploader        User?    @relation("UserAttachments", fields: [uploaderId], references: [id], onDelete: Cascade)
+  fileName        String   @db.VarChar(255)
+  fileType        String   @db.VarChar(100)
+  fileSize        Int
+  storageProvider String   @default("backblaze_b2") @db.VarChar(50)
+  storageKey      String   @db.VarChar(500)
+  fileUrl         String?  @db.VarChar(1000)
+  createdAt       DateTime @default(now())
+
+  @@index([projectId])
+  @@index([messageId])
+  @@index([uploaderId])
+  @@map("attachments")
+}
+
+model ActivityLog {
+  id         String   @id @default(cuid())
+  projectId  String
+  project    Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  userId     String
+  user       User?    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  actionType String   @db.VarChar(100) // TASK_CREATED, TASK_UPDATED, BUG_REPORTED, BUG_STATUS_CHANGED, FILE_UPLOADED, MEMBER_JOINED
+  entityId   String?  @db.VarChar(100)
+  entityType String?  @db.VarChar(50)  // TASK, BUG, FILE, MESSAGE
+  metadata   String?  @db.Text         // JSON string for action details
+  createdAt  DateTime @default(now())
+
+  @@index([projectId])
+  @@index([userId])
+  @@index([actionType])
+  @@map("activity_logs")
+}
+
+// ─── Phase 6: Notification System ─────────────────────────────────────────────
+
+enum NotificationType {
+  MENTION
+  TASK_ASSIGNED
+  TASK_COMPLETED
+  BUG_ASSIGNED
+  BUG_RESOLVED
+  DIRECT_MESSAGE
+  REPLY
+}
+
+enum NotificationPriority {
+  HIGH
+  NORMAL
+  LOW
+}
+
+model Notification {
+  id          String               @id @default(cuid())
+  recipientId String
+  recipient   User                 @relation("ReceivedNotifications", fields: [recipientId], references: [id], onDelete: Cascade)
+  senderId    String?
+  sender      User?                @relation("SentNotifications", fields: [senderId], references: [id], onDelete: SetNull)
+  projectId   String?
+  project     Project?             @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  type        NotificationType
+  priority    NotificationPriority @default(NORMAL)
+  title       String               @db.VarChar(255)
+  message     String               @db.Text
+  entityId    String?              @db.VarChar(100) // taskId, bugId, messageId
+  entityType  String?              @db.VarChar(20)  // TASK | BUG | MESSAGE
+  read        Boolean              @default(false)
+  createdAt   DateTime             @default(now())
+
+  @@index([recipientId])
+  @@index([senderId])
+  @@index([projectId])
+  @@index([read])
+  @@map("notifications")
+}
+
+model NotificationPreference {
+  userId               String  @id
+  user                 User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  emailOnTaskAssigned  Boolean @default(true)
+  emailOnTaskCompleted Boolean @default(true)
+  emailOnBugAssigned   Boolean @default(true)
+  emailOnMention       Boolean @default(true)
+  inAppAll             Boolean @default(true)
+
+  @@map("notification_preferences")
+}

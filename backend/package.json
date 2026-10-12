@@ -1,0 +1,26 @@
+{
+  "name": "devconnect-backend",
+  "version": "1.0.0",
+  "description": "Devconnect / ZettaDev - Vercel Serverless Backend with TiDB Cloud & Backblaze B2",
+  "main": "server.mjs",
+  "scripts": {
+    "start": "node server.mjs",
+    "dev": "node server.mjs",
+    "socket": "node server.mjs",
+    "build": "tsc --noEmit",
+    "lint": "eslint",
+    "test:realtime": "node ../scripts/test-realtime-sockets.mjs"
+  },
+  "dependencies": {
+    "@aws-sdk/client-s3": "^3.1147.0",
+    "@aws-sdk/s3-request-presigner": "^3.1147.0",
+    "@prisma/client": "5.22.0",
+    "@tidbcloud/serverless": "^0.3.0",
+    "@vercel/node": "^3.2.0",
+    "socket.io": "^4.8.4"
+  },
+  "devDependencies": {
+    "@types/node": "^20",
+    "typescript": "^5"
+  }
+}
