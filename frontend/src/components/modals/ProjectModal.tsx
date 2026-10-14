@@ -4,7 +4,7 @@ import React, { useState } from 'react';
 import { useForm } from 'react-hook-form';
 import { z } from 'zod';
 import { useAppStore } from '@/lib/store';
-import { FolderPlus, X, AlertCircle, Sparkles, Loader2 } from 'lucide-react';
+import { FolderPlus, X, AlertCircle, Sparkles, Loader2, Users } from 'lucide-react';
 import { GithubIcon } from '@/components/ui/Icons';
 
 const projectFormSchema = z.object({
@@ -14,6 +14,10 @@ const projectFormSchema = z.object({
     .max(100, 'Project name must be under 100 characters'),
   description: z.string().max(500, 'Description must be under 500 characters').optional(),
   githubRepo: z.string().max(200, 'Repository must be under 200 characters').optional(),
+  maxMembers: z.preprocess(
+    (v) => (v === '' || v === undefined || v === null ? undefined : Number(v)),
+    z.number().int().min(1, 'Must allow at least 1 member').max(500, 'Cannot exceed 500 members').optional()
+  ),
 });
 
 type ProjectFormData = z.infer<typeof projectFormSchema>;
@@ -37,6 +41,7 @@ export function ProjectModal({ isOpen, onClose }: ProjectModalProps) {
       name: '',
       description: '',
       githubRepo: '',
+      maxMembers: 10,
     },
   });
 
@@ -59,6 +64,7 @@ export function ProjectModal({ isOpen, onClose }: ProjectModalProps) {
           name: data.name.trim(),
           description: data.description?.trim() || '',
           githubRepo: data.githubRepo?.trim() || '',
+          maxMembers: data.maxMembers ? Number(data.maxMembers) : undefined,
         }),
       });
 
@@ -179,12 +185,40 @@ export function ProjectModal({ isOpen, onClose }: ProjectModalProps) {
             </div>
           </div>
 
+          <div>
+            <div className="flex items-center justify-between mb-1.5">
+              <label className="block text-xs font-medium text-slate-300">
+                Max Members Allowed <span className="text-slate-500 font-normal">(Capacity Limit)</span>
+              </label>
+              <span className="text-[11px] text-slate-400 font-mono">Default: 10</span>
+            </div>
+            <div className="relative">
+              <span className="absolute left-3.5 top-1/2 -translate-y-1/2 text-slate-500">
+                <Users className="w-4 h-4" />
+              </span>
+              <input
+                type="number"
+                min={1}
+                max={500}
+                {...register('maxMembers')}
+                placeholder="e.g. 10 (Leave blank for unlimited)"
+                className="w-full pl-10 pr-3.5 py-2.5 rounded-xl bg-white/5 border border-white/10 text-sm text-white placeholder-slate-500 focus:outline-none focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500/20 transition-colors"
+              />
+            </div>
+            {errors.maxMembers && (
+              <p className="text-[11px] text-rose-400 mt-1">{errors.maxMembers.message}</p>
+            )}
+            <p className="text-[11px] text-slate-500 mt-1">
+              Limits the maximum number of developers allowed in this workspace. Can be adjusted anytime in settings.
+            </p>
+          </div>
+
           <div className="p-3 rounded-xl bg-indigo-950/30 border border-indigo-500/20 flex items-start gap-2.5">
             <Sparkles className="w-4 h-4 text-cyan-400 shrink-0 mt-0.5" />
             <div className="text-[11px] text-slate-300">
-              <p className="font-semibold text-white">Automated Setup</p>
+              <p className="font-semibold text-white">Automated Setup & Access</p>
               <p className="text-slate-400">
-                You will be atomically assigned as <span className="text-indigo-300 font-mono">OWNER</span>. Standard channels (<code className="text-cyan-300">general</code>, <code className="text-cyan-300">development</code>, <code className="text-cyan-300">bugs</code>, <code className="text-cyan-300">tasks</code>) are auto-generated.
+                All team members are granted <span className="text-indigo-300 font-mono font-medium">OWNER</span> access with full permissions across all project channels, tasks, and settings.
               </p>
             </div>
           </div>

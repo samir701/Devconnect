@@ -12,9 +12,14 @@ import { UserProfileModal } from '@/components/modals/UserProfileModal';
 import { SystemStatusModal } from '@/components/modals/SystemStatusModal';
 import { ProjectModal } from '@/components/modals/ProjectModal';
 import { ProjectMembersModal } from '@/components/modals/ProjectMembersModal';
+import { DeleteProjectModal } from '@/components/modals/DeleteProjectModal';
 import { AuthModal } from '@/components/modals/AuthModal';
 import { ConvertMessageModal } from '@/components/modals/ConvertMessageModal';
 import { NotificationSettingsModal } from '@/components/modals/NotificationSettingsModal';
+import { CallProvider } from '@/lib/callContext';
+import { IncomingCallModal } from '@/components/call/IncomingCallModal';
+import { ActiveCallModal } from '@/components/call/ActiveCallModal';
+import { FloatingCallWidget } from '@/components/call/FloatingCallWidget';
 import { useAppStore } from '@/lib/store';
 
 function WorkspaceMain() {
@@ -58,9 +63,15 @@ function WorkspaceMain() {
       <SystemStatusModal />
       <ProjectModal isOpen={isCreateProjectOpen} onClose={() => setIsCreateProjectOpen(false)} />
       <ProjectMembersModal isOpen={isProjectMembersOpen} onClose={() => setIsProjectMembersOpen(false)} />
+      <DeleteProjectModal />
       <AuthModal isOpen={isAuthModalOpen} onClose={() => setIsAuthModalOpen(false)} />
       {/* Phase 6 – Notification Settings Modal */}
       <NotificationSettingsModal />
+
+      {/* WebRTC Realtime Audio & Video Calling Components */}
+      <IncomingCallModal />
+      <ActiveCallModal />
+      <FloatingCallWidget />
     </div>
   );
 }
@@ -68,7 +79,9 @@ function WorkspaceMain() {
 export default function Page() {
   return (
     <AppProvider>
-      <WorkspaceMain />
+      <CallProvider>
+        <WorkspaceMain />
+      </CallProvider>
     </AppProvider>
   );
 }

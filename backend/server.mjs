@@ -33,6 +33,39 @@ const prisma = new PrismaClient({
 // Ephemeral in-memory presence and connection state
 const activeSocketsByUser = new Map(); // userId -> Set of socket IDs
 const userPresenceMap = new Map();     // userId -> 'ONLINE' | 'AWAY' | 'OFFLINE'
+// Ephemeral in-memory WebRTC call rooms state (roomId -> Map<socketId, participantInfo>)
+const activeCallRooms = new Map();
+
+// Helper to leave call rooms and notify peers
+function leaveCallRoom(socket, targetRoomId = null) {
+  const roomsToCheck = targetRoomId ? [targetRoomId] : Array.from(activeCallRooms.keys());
+  for (const rId of roomsToCheck) {
+    const room = activeCallRooms.get(rId);
+    if (room && room.has(socket.id)) {
+      const participant = room.get(socket.id);
+      room.delete(socket.id);
+      socket.leave(`call:${rId}`);
+
+      socket.to(`call:${rId}`).emit('webrtc_user_left', {
+        socketId: socket.id,
+        userId: participant?.userId,
+        roomId: rId,
+      });
+
+      if (room.size === 0) {
+        activeCallRooms.delete(rId);
+      }
+
+      if (typeof io !== 'undefined') {
+        io.emit('webrtc_room_status_changed', {
+          roomId: rId,
+          participantCount: room ? room.size : 0,
+          participants: room ? Array.from(room.values()) : [],
+        });
+      }
+    }
+  }
+}
 
 // Helper to resolve room name for direct conversations, channels, or custom rooms
 function getRoomName(payload) {
@@ -87,8 +120,21 @@ const server = http.createServer((req, res) => {
     return;
   }
 
-  // Handle server-to-server broadcast for file uploads, activity logs, task/bug updates, and notifications
-  const eventMatch = req.url.match(/^\/(?:api\/)?events\/(file_uploaded|activity_logged|task_updated|bug_updated|new_notification)/);
+  if (req.url === '/api/calls/active' || req.url === '/calls') {
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    const summary = {};
+    for (const [rId, room] of activeCallRooms.entries()) {
+      summary[rId] = {
+        participantCount: room.size,
+        participants: Array.from(room.values()),
+      };
+    }
+    res.end(JSON.stringify({ activeCalls: summary }));
+    return;
+  }
+
+  // Handle server-to-server broadcast for realtime triggers (messages, projects, members, tasks, bugs, files, notifications)
+  const eventMatch = req.url.match(/^\/(?:api\/)?events\/([a-zA-Z0-9_-]+)/);
   if (req.method === 'POST' && eventMatch) {
     const eventName = eventMatch[1];
     let body = '';
@@ -146,7 +192,10 @@ const io = new SocketIOServer(server, {
 
 // 5. Socket.IO Event Handlers
 io.on('connection', (socket) => {
-  const userId = socket.handshake.query.userId || 'user_samir';
+  const userId = socket.handshake.query.userId;
+  if (!userId) {
+    return;
+  }
   socket.data = { userId };
 
   // Track active connection
@@ -179,6 +228,32 @@ io.on('connection', (socket) => {
     socket.emit('left_conversation', { roomName, ...payload });
   });
 
+const LOCAL_STORE_FILE = path.resolve(__dirname, '../.devconnect-data/local-store.json');
+
+function persistMessageToLocalStore(msg) {
+  try {
+    if (fs.existsSync(LOCAL_STORE_FILE)) {
+      const raw = fs.readFileSync(LOCAL_STORE_FILE, 'utf-8');
+      if (raw) {
+        const data = JSON.parse(raw);
+        if (!data.messages) data.messages = [];
+        if (!data.messages.some((m) => m.id === msg.id)) {
+          data.messages.push(msg);
+          const tmp = LOCAL_STORE_FILE + '.tmp';
+          fs.writeFileSync(tmp, JSON.stringify(data, null, 2), 'utf-8');
+          try {
+            fs.renameSync(tmp, LOCAL_STORE_FILE);
+          } catch {
+            fs.writeFileSync(LOCAL_STORE_FILE, JSON.stringify(data, null, 2), 'utf-8');
+          }
+        }
+      }
+    }
+  } catch (err) {
+    console.error('[Socket] Failed to persist message fallback to local store:', err);
+  }
+}
+
   // 3. Send Message (Persist in TiDB + Broadcast to Room)
   socket.on('send_message', async (payload) => {
     const roomName = getRoomName(payload);
@@ -188,6 +263,7 @@ io.on('connection', (socket) => {
     // If message was already created via REST API, pass it through directly
     if (payload.id && payload.sender) {
       createdMessage = payload;
+      persistMessageToLocalStore(createdMessage);
     } else {
       try {
         createdMessage = await prisma.message.create({
@@ -212,6 +288,7 @@ io.on('connection', (socket) => {
         });
         if (payload.codeLanguage) createdMessage.codeLanguage = payload.codeLanguage;
         if (payload.codeFilename) createdMessage.codeFilename = payload.codeFilename;
+        persistMessageToLocalStore(createdMessage);
       } catch {
         // Ephemeral fallback if database is momentarily unreachable
         createdMessage = {
@@ -234,6 +311,7 @@ io.on('connection', (socket) => {
             status: 'ONLINE',
           },
         };
+        persistMessageToLocalStore(createdMessage);
       }
     }
 
@@ -396,8 +474,173 @@ io.on('connection', (socket) => {
     }
   });
 
-  // 8. Disconnect Cleanup
+  // 8. Project & Member Realtime Triggers
+  socket.on('project_created', (payload) => {
+    io.emit('project_created', payload);
+  });
+
+  socket.on('project_deleted', (payload) => {
+    io.emit('project_deleted', payload);
+  });
+
+  socket.on('member_added', (payload) => {
+    io.emit('member_added', payload);
+  });
+
+  socket.on('member_removed', (payload) => {
+    io.emit('member_removed', payload);
+  });
+
+  socket.on('workspace_sync', (payload) => {
+    io.emit('workspace_sync', payload);
+  });
+
+  // 9. WebRTC Realtime Voice & Video Calling Handlers
+  // A. 1-on-1 Direct Call Invitation
+  socket.on('webrtc_call_user', (payload) => {
+    // payload: { userToCall, fromUser, isVideo, roomId, callType, title }
+    if (!payload?.userToCall) return;
+    io.to(`user:${payload.userToCall}`).emit('webrtc_incoming_call', {
+      callerSocketId: socket.id,
+      callerUser: payload.fromUser,
+      isVideo: payload.isVideo ?? true,
+      roomId: payload.roomId,
+      callType: payload.callType || 'DIRECT',
+      title: payload.title || payload.fromUser?.name || 'Incoming Call',
+    });
+  });
+
+  // B. 1-on-1 Call Declined/Busy
+  socket.on('webrtc_call_rejected', (payload) => {
+    if (payload?.toSocketId) {
+      io.to(payload.toSocketId).emit('webrtc_call_rejected', {
+        fromUser: payload.fromUser,
+        reason: payload.reason || 'declined',
+      });
+    } else if (payload?.toUserId) {
+      io.to(`user:${payload.toUserId}`).emit('webrtc_call_rejected', {
+        fromUser: payload.fromUser,
+        reason: payload.reason || 'declined',
+      });
+    }
+  });
+
+  // C. Join Call Room (Mesh conference for Direct or Group calls)
+  socket.on('webrtc_join_room', (payload) => {
+    const { roomId, user, isVideo = true, isMuted = false } = payload || {};
+    if (!roomId) return;
+
+    socket.join(`call:${roomId}`);
+
+    if (!activeCallRooms.has(roomId)) {
+      activeCallRooms.set(roomId, new Map());
+    }
+    const room = activeCallRooms.get(roomId);
+
+    // Get existing participants before adding self
+    const existingParticipants = Array.from(room.values()).filter((p) => p.socketId !== socket.id);
+
+    // Send existing peers to newly joined participant
+    socket.emit('webrtc_room_users', {
+      roomId,
+      participants: existingParticipants,
+    });
+
+    // Save self to room
+    room.set(socket.id, {
+      socketId: socket.id,
+      userId: user?.id || userId,
+      user: user || { id: userId, name: 'Developer' },
+      isVideo,
+      isMuted,
+      isScreenSharing: false,
+    });
+
+    // Notify other peers in room that a new user joined
+    socket.to(`call:${roomId}`).emit('webrtc_user_joined', {
+      socketId: socket.id,
+      userId: user?.id || userId,
+      user: user || { id: userId, name: 'Developer' },
+      isVideo,
+      isMuted,
+    });
+
+    // Broadcast room status change across workspace
+    io.emit('webrtc_room_status_changed', {
+      roomId,
+      participantCount: room.size,
+      participants: Array.from(room.values()),
+    });
+  });
+
+  // D. Relay WebRTC Signal (SDP Offer / Answer)
+  socket.on('webrtc_signal', (payload) => {
+    // payload: { toSocketId, signal, fromUser }
+    if (payload?.toSocketId && payload?.signal) {
+      io.to(payload.toSocketId).emit('webrtc_signal', {
+        fromSocketId: socket.id,
+        fromUserId: userId,
+        fromUser: payload.fromUser,
+        signal: payload.signal,
+      });
+    }
+  });
+
+  // E. Relay ICE Candidate
+  socket.on('webrtc_ice_candidate', (payload) => {
+    // payload: { toSocketId, candidate }
+    if (payload?.toSocketId && payload?.candidate) {
+      io.to(payload.toSocketId).emit('webrtc_ice_candidate', {
+        fromSocketId: socket.id,
+        candidate: payload.candidate,
+      });
+    }
+  });
+
+  // F. Media State Toggle (Mute / Video / Screen Share status sync)
+  socket.on('webrtc_media_toggle', (payload) => {
+    const { roomId, isMuted, isVideoOff, isScreenSharing } = payload || {};
+    if (roomId && activeCallRooms.has(roomId)) {
+      const room = activeCallRooms.get(roomId);
+      if (room.has(socket.id)) {
+        const participant = room.get(socket.id);
+        if (isMuted !== undefined) participant.isMuted = isMuted;
+        if (isVideoOff !== undefined) participant.isVideo = !isVideoOff;
+        if (isScreenSharing !== undefined) participant.isScreenSharing = isScreenSharing;
+      }
+      socket.to(`call:${roomId}`).emit('webrtc_peer_media_toggled', {
+        socketId: socket.id,
+        userId,
+        isMuted,
+        isVideoOff,
+        isScreenSharing,
+      });
+    }
+  });
+
+  // G. Leave Call Room
+  socket.on('webrtc_leave_room', (payload) => {
+    const roomId = payload?.roomId;
+    leaveCallRoom(socket, roomId);
+  });
+
+  // H. Query Active Call Rooms
+  socket.on('webrtc_get_active_rooms', () => {
+    const summary = {};
+    for (const [rId, room] of activeCallRooms.entries()) {
+      summary[rId] = {
+        participantCount: room.size,
+        participants: Array.from(room.values()),
+      };
+    }
+    socket.emit('webrtc_active_rooms_list', summary);
+  });
+
+  // 10. Disconnect Cleanup
   socket.on('disconnect', () => {
+    // Clean up any call room participations
+    leaveCallRoom(socket);
+
     const userSockets = activeSocketsByUser.get(userId);
     if (userSockets) {
       userSockets.delete(socket.id);

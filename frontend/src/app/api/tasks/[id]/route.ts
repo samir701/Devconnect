@@ -1,10 +1,10 @@
 import { NextResponse } from 'next/server';
 import { getSessionUserId, checkProjectPermission } from '@/lib/auth-guard';
-import { updateTask } from '@/lib/db';
+import { updateTask, getUserById, getProjectById } from '@/lib/db';
 import { prisma } from '@/lib/prisma';
 import { ProjectRole } from '@/lib/types';
 import { createNotification, getUserNotificationPreferences } from '@/lib/notifications';
-import { sendTaskCompletedEmail } from '@/lib/email/notifications';
+import { sendTaskCompletedEmail, sendTaskAssignedEmail } from '@/lib/email/notifications';
 
 
 const MUTATION_ROLES: ProjectRole[] = ['OWNER', 'ADMIN', 'DEVELOPER', 'QA'];
@@ -124,7 +124,7 @@ export async function PATCH(
     // ── Phase 6: Notify task creator when task is marked COMPLETED ────────────
     const isNowCompleted = body.status === 'COMPLETED' && previousStatus !== 'COMPLETED';
     const creatorId = existingTask.createdBy;
-    const completerId = userId;
+    const completerId = body.userId || body.completedBy || userId;
 
     if (isNowCompleted && creatorId && completerId !== creatorId) {
       try {
@@ -144,17 +144,91 @@ export async function PATCH(
         }
 
         if (creatorPrefs.emailOnTaskCompleted) {
-          const [completer, creator, project] = await Promise.all([
-            prisma.user.findUnique({ where: { id: completerId }, select: { name: true, email: true } }),
-            prisma.user.findUnique({ where: { id: creatorId }, select: { name: true, email: true } }),
-            prisma.project.findUnique({ where: { id: existingTask.projectId }, select: { name: true } }),
-          ]);
+          let completer = null;
+          let creator = null;
+          let project = null;
+
+          try {
+            [completer, creator, project] = await Promise.all([
+              prisma.user.findUnique({ where: { id: completerId }, select: { name: true, email: true } }),
+              prisma.user.findUnique({ where: { id: creatorId }, select: { name: true, email: true } }),
+              prisma.project.findUnique({ where: { id: existingTask.projectId }, select: { name: true } }),
+            ]);
+          } catch {}
+
+          if (!completer) {
+            const u = await getUserById(completerId);
+            if (u) completer = { name: u.name, email: u.email };
+          }
+          if (!creator) {
+            const u = await getUserById(creatorId);
+            if (u) creator = { name: u.name, email: u.email };
+          }
+          if (!project) {
+            const p = await getProjectById(existingTask.projectId);
+            if (p) project = { name: p.name };
+          }
+
           if (completer && creator && project) {
             sendTaskCompletedEmail({ task: existingTask, completer, creator, project }).catch(console.error);
           }
         }
       } catch (notifErr) {
         console.error('[Tasks] Completion notification error (non-fatal):', notifErr);
+      }
+    }
+
+    // ── Phase 6: Notify newly assigned team member if assignedTo changed ──────
+    const newAssigneeId = body.assignedTo;
+    if (newAssigneeId && newAssigneeId !== existingTask.assignedTo && newAssigneeId !== completerId) {
+      try {
+        const assigneePrefs = await getUserNotificationPreferences(newAssigneeId);
+        if (assigneePrefs.inAppAll) {
+          await createNotification({
+            recipientId: newAssigneeId,
+            senderId: completerId,
+            projectId: existingTask.projectId,
+            type: 'TASK_ASSIGNED',
+            priority: 'HIGH',
+            title: `Task Assigned: ${existingTask.title}`,
+            message: `You have been assigned a task: "${existingTask.title}"`,
+            entityId: existingTask.id,
+            entityType: 'TASK',
+          });
+        }
+
+        if (assigneePrefs.emailOnTaskAssigned) {
+          let assigner = null;
+          let assignee = null;
+          let project = null;
+
+          try {
+            [assigner, assignee, project] = await Promise.all([
+              prisma.user.findUnique({ where: { id: completerId }, select: { name: true, email: true } }),
+              prisma.user.findUnique({ where: { id: newAssigneeId }, select: { name: true, email: true } }),
+              prisma.project.findUnique({ where: { id: existingTask.projectId }, select: { name: true } }),
+            ]);
+          } catch {}
+
+          if (!assigner) {
+            const u = await getUserById(completerId);
+            if (u) assigner = { name: u.name, email: u.email };
+          }
+          if (!assignee) {
+            const u = await getUserById(newAssigneeId);
+            if (u) assignee = { name: u.name, email: u.email };
+          }
+          if (!project) {
+            const p = await getProjectById(existingTask.projectId);
+            if (p) project = { name: p.name };
+          }
+
+          if (assigner && assignee && project) {
+            sendTaskAssignedEmail({ task: existingTask, creator: assigner, assignee, project }).catch(console.error);
+          }
+        }
+      } catch (assignErr) {
+        console.error('[Tasks] Assignment notification error (non-fatal):', assignErr);
       }
     }
 

@@ -20,9 +20,17 @@ export function CreateTaskModal() {
   const [description, setDescription] = useState('');
   const [priority, setPriority] = useState<PriorityLevel>('HIGH');
   const [status, setStatus] = useState<TaskStatus>('TODO');
-  const [assignedTo, setAssignedTo] = useState('user_samir');
+  const [assignedTo, setAssignedTo] = useState(currentUser?.id || '');
   const [dueDate, setDueDate] = useState('Today');
   const [alsoSendInChat, setAlsoSendInChat] = useState(true);
+
+  useEffect(() => {
+    if (currentUser?.id && !assignedTo) {
+      setAssignedTo(currentUser.id);
+    } else if (!assignedTo && users.length > 0) {
+      setAssignedTo(users[0].id);
+    }
+  }, [currentUser, users, assignedTo]);
 
   useEffect(() => {
     if (prefillTask) {
@@ -31,12 +39,14 @@ export function CreateTaskModal() {
       if (prefillTask.priority) setPriority(prefillTask.priority);
       if (prefillTask.status) setStatus(prefillTask.status);
       if (prefillTask.dueDate) setDueDate(prefillTask.dueDate);
+      if (prefillTask.assignedTo) setAssignedTo(prefillTask.assignedTo);
     } else {
       setTitle('');
       setDescription('');
       setStatus('TODO');
+      if (currentUser?.id) setAssignedTo(currentUser.id);
     }
-  }, [prefillTask, isCreateTaskOpen]);
+  }, [prefillTask, isCreateTaskOpen, currentUser]);
 
   if (!isCreateTaskOpen) return null;
 

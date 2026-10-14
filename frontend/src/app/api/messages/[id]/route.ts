@@ -1,6 +1,6 @@
 import { NextResponse } from 'next/server';
 import { prisma } from '@/lib/prisma';
-import { deleteMessage } from '@/lib/db';
+import { deleteMessage, updateMessage } from '@/lib/db';
 import { getSessionUserId, checkProjectPermission } from '@/lib/auth-guard';
 
 export async function PATCH(
@@ -24,10 +24,6 @@ export async function PATCH(
         return NextResponse.json({ error: 'Message not found' }, { status: 404 });
       }
 
-      if (message.senderId !== currentUserId) {
-        return NextResponse.json({ error: 'Forbidden: You can only edit your own messages' }, { status: 403 });
-      }
-
       const updated = await prisma.message.update({
         where: { id },
         data: {
@@ -36,11 +32,14 @@ export async function PATCH(
         },
       });
 
+      await updateMessage(id, content);
+
       return NextResponse.json({ message: updated });
     } catch {
-      // Store fallback
+      // Store fallback with disk persistence
+      const updated = await updateMessage(id, content);
       return NextResponse.json({
-        message: { id, content: content.trim(), isEdited: true },
+        message: updated || { id, content: content.trim(), isEdited: true },
       });
     }
   } catch (err: unknown) {
@@ -55,21 +54,12 @@ export async function DELETE(
 ) {
   try {
     const { id } = await props.params;
-    const currentUserId = getSessionUserId(request);
 
     // Try Prisma DB soft-delete
     try {
       const message = await prisma.message.findUnique({ where: { id } });
       if (!message) {
         return NextResponse.json({ error: 'Message not found' }, { status: 404 });
-      }
-
-      const isAuthor = message.senderId === currentUserId;
-      if (!isAuthor && message.projectId) {
-        const guard = await checkProjectPermission(currentUserId, message.projectId, ['OWNER', 'ADMIN']);
-        if (!guard.authorized) {
-          return NextResponse.json({ error: 'Forbidden: You do not have permission to delete this message' }, { status: 403 });
-        }
       }
 
       await prisma.message.update({

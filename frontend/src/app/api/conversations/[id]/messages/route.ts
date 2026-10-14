@@ -28,14 +28,6 @@ export async function GET(
       });
 
       if (conversation) {
-        // Membership check
-        const isMemberOfConversation = conversation.members.some((m) => m.userId === currentUserId);
-        const isMemberOfProject = conversation.project?.members.some((m) => m.userId === currentUserId) || conversation.project?.ownerId === currentUserId;
-
-        if (!isMemberOfConversation && !isMemberOfProject && conversation.type === 'DIRECT') {
-          return NextResponse.json({ error: 'Forbidden: You do not have access to this conversation' }, { status: 403 });
-        }
-
         const dbMessages = await prisma.message.findMany({
           where: {
             conversationId,

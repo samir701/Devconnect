@@ -12,16 +12,25 @@ export function CreateBugModal() {
     createBug,
     prefillBug,
     users,
+    currentUser,
     sendMessage,
     activeProjectId,
   } = useAppStore();
 
   const [title, setTitle] = useState('');
   const [description, setDescription] = useState('');
-  const [endpoint, setEndpoint] = useState('/api/auth/login');
+  const [endpoint, setEndpoint] = useState('/api/endpoint');
   const [priority, setPriority] = useState<PriorityLevel>('HIGH');
-  const [assignedTo, setAssignedTo] = useState('user_arun');
+  const [assignedTo, setAssignedTo] = useState(currentUser?.id || '');
   const [alsoSendInChat, setAlsoSendInChat] = useState(true);
+
+  useEffect(() => {
+    if (currentUser?.id && !assignedTo) {
+      setAssignedTo(currentUser.id);
+    } else if (!assignedTo && users.length > 0) {
+      setAssignedTo(users[0].id);
+    }
+  }, [currentUser, users, assignedTo]);
 
   useEffect(() => {
     if (prefillBug) {
@@ -29,11 +38,13 @@ export function CreateBugModal() {
       setDescription(prefillBug.description || '');
       if (prefillBug.endpoint) setEndpoint(prefillBug.endpoint);
       if (prefillBug.priority) setPriority(prefillBug.priority);
+      if (prefillBug.assignedTo) setAssignedTo(prefillBug.assignedTo);
     } else {
       setTitle('');
       setDescription('');
+      if (currentUser?.id) setAssignedTo(currentUser.id);
     }
-  }, [prefillBug, isCreateBugOpen]);
+  }, [prefillBug, isCreateBugOpen, currentUser]);
 
   if (!isCreateBugOpen) return null;
 

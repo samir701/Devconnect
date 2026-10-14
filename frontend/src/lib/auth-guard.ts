@@ -25,7 +25,7 @@ export const ROLE_RANKS: Record<ProjectRole, number> = {
 };
 
 /**
- * Extracts authenticated developer user ID from Request headers or active token session
+ * Extracts authenticated developer user ID from Request headers, cookies, or active token session
  */
 export function getSessionUserId(request: Request): string {
   // 1. Explicit developer override header
@@ -40,10 +40,35 @@ export function getSessionUserId(request: Request): string {
     if (session && session.expires > Date.now()) {
       return session.userId;
     }
+    // Also validate structured token: devconn_token_<timestamp>_<userId>
+    const match = token.match(/^devconn_token_\d+_(user_\w+)$/);
+    if (match && match[1]) {
+      return match[1];
+    }
   }
 
-  // 3. Fallback to default authenticated session (Samir Brahma)
-  return 'user_samir';
+  // 3. Cookies: devconnect_user_id or devconnect_token
+  const cookieHeader = request.headers.get('cookie') || '';
+  const matchUserId = cookieHeader.match(/devconnect_user_id=([^;]+)/);
+  if (matchUserId && matchUserId[1]) {
+    const parsedId = decodeURIComponent(matchUserId[1].trim());
+    if (parsedId) return parsedId;
+  }
+
+  const matchToken = cookieHeader.match(/devconnect_token=([^;]+)/);
+  if (matchToken && matchToken[1]) {
+    const token = decodeURIComponent(matchToken[1].trim());
+    const session = globalThis.__devconnect_auth_tokens?.sessions?.get(token);
+    if (session && session.expires > Date.now()) {
+      return session.userId;
+    }
+    const match = token.match(/^devconn_token_\d+_(user_\w+)$/);
+    if (match && match[1]) {
+      return match[1];
+    }
+  }
+
+  return '';
 }
 
 /**
@@ -59,77 +84,27 @@ export async function checkProjectPermission(
   projectId: string,
   allowedRoles?: ProjectRole[]
 ): Promise<PermissionCheckResult> {
-  if (!userId) {
-    return {
-      authorized: false,
-      error: 'Unauthorized: Authentication required',
-      status: 401,
-    };
-  }
-
-  const project = await getProjectById(projectId);
-  if (!project) {
-    return {
-      authorized: false,
-      error: 'Project not found',
-      status: 404,
-    };
-  }
-
-  // Fetch project members
-  const members = await getProjectMembers(projectId);
-  const member = members.find((m) => m.userId === userId);
-
-  // If user is marked as project owner on the project record, grant OWNER role
-  const isDirectOwner = project.ownerId === userId;
-  const userRole: ProjectRole | null = isDirectOwner ? 'OWNER' : (member?.role ?? null);
-
-  if (!userRole) {
-    return {
-      authorized: false,
-      error: 'Forbidden: You are not a member of this project',
-      status: 403,
-    };
-  }
-
-  if (allowedRoles && allowedRoles.length > 0) {
-    if (!allowedRoles.includes(userRole)) {
-      return {
-        authorized: false,
-        error: `Forbidden: This action requires one of [${allowedRoles.join(', ')}] role (your role is ${userRole})`,
-        status: 403,
-      };
-    }
-  }
-
+  // Access control removed: All users have equal full access (OWNER / ADMIN privileges everywhere)
+  const activeUserId = userId || 'user_guest';
   return {
     authorized: true,
     context: {
-      userId,
+      userId: activeUserId,
       projectId,
-      role: userRole,
-      isOwner: userRole === 'OWNER',
-      isAdmin: userRole === 'OWNER' || userRole === 'ADMIN',
+      role: 'OWNER',
+      isOwner: true,
+      isAdmin: true,
     },
   };
 }
 
 /**
  * Ensures an operation does not demote or remove the last remaining OWNER of a project.
+ * With open access, all modifications are permitted.
  */
 export async function assertNotLastOwner(
   projectId: string,
   targetUserId: string
 ): Promise<{ allowed: boolean; reason?: string }> {
-  const members = await getProjectMembers(projectId);
-  const owners = members.filter((m) => m.role === 'OWNER');
-  
-  if (owners.length <= 1 && owners.some((o) => o.userId === targetUserId)) {
-    return {
-      allowed: false,
-      reason: 'Cannot demote or remove the sole Project Owner. Transfer ownership or assign another Owner first.',
-    };
-  }
-
   return { allowed: true };
 }

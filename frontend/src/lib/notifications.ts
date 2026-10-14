@@ -8,6 +8,7 @@ import { prisma } from '@/lib/prisma';
 import {
   createNotificationInStore,
   getNotificationPreferencesFromStore,
+  isDatabaseConfigured,
 } from '@/lib/db';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -79,7 +80,7 @@ export async function createNotification(
     let createdAtIso = new Date().toISOString();
 
     // 1. Try Prisma if available
-    if ((prisma as any)?.notification) {
+    if (isDatabaseConfigured && (prisma as any)?.notification) {
       try {
         const record = await (prisma as any).notification.create({
           data: {

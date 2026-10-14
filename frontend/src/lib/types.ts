@@ -22,6 +22,7 @@ export interface User {
   status: UserStatus;
   lastSeen?: string;
   currentProjectId?: string;
+  passwordHash?: string;
   createdAt?: string;
   updatedAt?: string;
 }
@@ -34,6 +35,7 @@ export interface Project {
   githubRepo?: string;
   status: 'ACTIVE' | 'ARCHIVED' | 'PAUSED';
   channels: string[];
+  maxMembers?: number;
   createdAt: string;
   updatedAt?: string;
 }

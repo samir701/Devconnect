@@ -16,7 +16,12 @@ import {
   ChevronDown,
   Layers,
   Users,
+  Trash2,
+  Phone,
+  Video,
+  PhoneCall,
 } from 'lucide-react';
+import { useCall } from '@/lib/callContext';
 
 export function Sidebar() {
   const {
@@ -32,11 +37,16 @@ export function Sidebar() {
     setIsSearchOpen,
     setIsProfileOpen,
     setIsCreateProjectOpen,
+    setIsDeleteProjectOpen,
+    setProjectToDelete,
     setIsProjectMembersOpen,
     setIsStatusOpen,
     isMobileSidebarOpen,
     setIsMobileSidebarOpen,
+    setIsAuthModalOpen,
   } = useAppStore();
+
+  const { activeGroupCalls, startDirectCall, callStatus } = useCall();
 
   return (
     <>
@@ -149,37 +159,66 @@ export function Sidebar() {
                         <span className="truncate">{proj.name}</span>
                       </button>
 
-                      {isActive && (
+                      <div className="flex items-center gap-0.5 shrink-0 ml-1">
+                        {isActive && (
+                          <button
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              setIsProjectMembersOpen(true);
+                            }}
+                            className="p-1 text-slate-400 hover:text-cyan-300 hover:bg-white/10 rounded-md transition-colors cursor-pointer"
+                            title="Manage Project Members & Capacity"
+                          >
+                            <Users className="w-3.5 h-3.5" />
+                          </button>
+                        )}
                         <button
                           onClick={(e) => {
                             e.stopPropagation();
-                            setIsProjectMembersOpen(true);
+                            setProjectToDelete(proj);
+                            setIsDeleteProjectOpen(true);
                           }}
-                          className="p-1 text-slate-400 hover:text-cyan-300 hover:bg-white/10 rounded-md transition-colors shrink-0 ml-1 cursor-pointer"
-                          title="Manage Project Members & Roles"
+                          className="p-1 text-slate-500 hover:text-rose-400 hover:bg-rose-500/10 rounded-md transition-colors cursor-pointer opacity-0 group-hover:opacity-100"
+                          title={`Delete Group "${proj.name}"`}
                         >
-                          <Users className="w-3.5 h-3.5" />
+                          <Trash2 className="w-3.5 h-3.5" />
                         </button>
-                      )}
+                      </div>
                     </div>
 
                     {/* Channel sub-views when project is active */}
                     {isActive && (
                       <div className="pl-4 pr-1 py-1 space-y-0.5 border-l border-white/10 ml-3">
-                        {proj.channels.map((ch) => (
-                          <button
-                            key={ch}
-                            onClick={() => selectChannel(ch)}
-                            className={`w-full flex items-center gap-1.5 px-2 py-1 rounded-lg text-xs capitalize transition-colors ${
-                              activeChannel === ch
-                                ? 'bg-white/10 text-cyan-300 font-semibold'
-                                : 'text-slate-400 hover:text-white hover:bg-white/5'
-                            }`}
-                          >
-                            <Hash className="w-3 h-3 text-slate-500 shrink-0" />
-                            <span>{ch}</span>
-                          </button>
-                        ))}
+                        {proj.channels.map((ch) => {
+                          const callRoom = activeGroupCalls[`group_${proj.id}_${ch}`];
+                          const hasCall = callRoom && callRoom.participantCount > 0;
+
+                          return (
+                            <button
+                              key={ch}
+                              onClick={() => selectChannel(ch)}
+                              className={`w-full flex items-center justify-between px-2 py-1 rounded-lg text-xs capitalize transition-colors ${
+                                activeChannel === ch
+                                  ? 'bg-white/10 text-cyan-300 font-semibold'
+                                  : 'text-slate-400 hover:text-white hover:bg-white/5'
+                              }`}
+                            >
+                              <div className="flex items-center gap-1.5 min-w-0">
+                                <Hash className="w-3 h-3 text-slate-500 shrink-0" />
+                                <span className="truncate">{ch}</span>
+                              </div>
+                              {hasCall && (
+                                <span
+                                  className="flex items-center gap-1 text-[10px] text-emerald-400 bg-emerald-500/10 px-1.5 py-0.2 rounded-full border border-emerald-500/20 font-mono shrink-0 animate-pulse"
+                                  title={`Live Call: ${callRoom.participantCount} participant${callRoom.participantCount > 1 ? 's' : ''}`}
+                                >
+                                  <PhoneCall className="w-2.5 h-2.5" />
+                                  <span>{callRoom.participantCount}</span>
+                                </span>
+                              )}
+                            </button>
+                          );
+                        })}
                       </div>
                     )}
                   </div>
@@ -198,67 +237,124 @@ export function Sidebar() {
             </div>
 
             <div className="space-y-1">
-              {conversations.map((conv) => {
-                const isSelected = activeConversation?.id === conv.id;
-                const other = conv.otherUser;
-                return (
-                  <button
-                    key={conv.id}
-                    onClick={() => selectConversation(conv)}
-                    className={`w-full flex items-center justify-between px-2.5 py-2 rounded-xl text-xs transition-all ${
-                      isSelected
-                        ? 'bg-indigo-600/20 text-white border border-indigo-500/30'
-                        : 'text-slate-300 hover:text-white hover:bg-white/5'
-                    }`}
-                  >
-                    <div className="flex items-center gap-2.5 min-w-0">
-                      <Avatar
-                        name={other?.name || 'Developer'}
-                        avatarUrl={other?.avatarUrl}
-                        status={other?.status}
-                        size="xs"
-                      />
-                      <span className="truncate font-medium">
-                        {other?.name || 'Developer'}
-                      </span>
-                    </div>
+              {(() => {
+                const realConversations = conversations.filter((conv) => {
+                  const other = conv.otherUser;
+                  if (!other) return false;
+                  const email = (other.email || '').toLowerCase();
+                  return !email.endsWith('@test.dev') && !email.endsWith('@example.com') && !email.includes('test_');
+                });
 
-                    {other?.status === 'ONLINE' && (
-                      <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 shrink-0" />
-                    )}
-                  </button>
-                );
-              })}
+                if (realConversations.length === 0) {
+                  return (
+                    <div className="px-2.5 py-2 text-[11px] text-slate-500 italic">
+                      No direct messages yet
+                    </div>
+                  );
+                }
+
+                return realConversations.map((conv) => {
+                  const isSelected = activeConversation?.id === conv.id;
+                  const other = conv.otherUser;
+                  return (
+                    <div
+                      key={conv.id}
+                      onClick={() => selectConversation(conv)}
+                      className={`group w-full flex items-center justify-between px-2.5 py-2 rounded-xl text-xs transition-all cursor-pointer ${
+                        isSelected
+                          ? 'bg-indigo-600/20 text-white border border-indigo-500/30'
+                          : 'text-slate-300 hover:text-white hover:bg-white/5'
+                      }`}
+                    >
+                      <div className="flex items-center gap-2.5 min-w-0">
+                        <Avatar
+                          name={other?.name || 'Developer'}
+                          avatarUrl={other?.avatarUrl}
+                          status={other?.status}
+                          size="xs"
+                        />
+                        <span className="truncate font-medium">
+                          {other?.name || 'Developer'}
+                        </span>
+                      </div>
+
+                      <div className="flex items-center gap-1">
+                        {/* Quick Call Actions on Hover */}
+                        {other && (
+                          <div className="hidden group-hover:flex items-center gap-0.5">
+                            <button
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                startDirectCall(other, false);
+                              }}
+                              disabled={callStatus !== 'IDLE'}
+                              className="p-1 rounded text-slate-400 hover:text-emerald-400 hover:bg-emerald-500/10 transition-colors"
+                              title={`Voice call with ${other.name}`}
+                            >
+                              <Phone className="w-3 h-3" />
+                            </button>
+                            <button
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                startDirectCall(other, true);
+                              }}
+                              disabled={callStatus !== 'IDLE'}
+                              className="p-1 rounded text-slate-400 hover:text-cyan-400 hover:bg-cyan-500/10 transition-colors"
+                              title={`Video call with ${other.name}`}
+                            >
+                              <Video className="w-3 h-3" />
+                            </button>
+                          </div>
+                        )}
+
+                        {other?.status === 'ONLINE' && (
+                          <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 shrink-0 group-hover:hidden" />
+                        )}
+                      </div>
+                    </div>
+                  );
+                });
+              })()}
             </div>
           </div>
         </div>
 
         {/* Current User Profile Bar */}
         <div className="p-3 border-t border-white/10 bg-[#070b13] shrink-0">
-          <button
-            onClick={() => setIsProfileOpen(true)}
-            className="w-full flex items-center justify-between p-2 rounded-xl hover:bg-white/5 border border-transparent hover:border-white/10 transition-all text-left"
-          >
-            <div className="flex items-center gap-2.5 min-w-0">
-              <Avatar
-                name={currentUser?.name || 'Samir Brahma'}
-                avatarUrl={currentUser?.avatarUrl}
-                status={currentUser?.status || 'ONLINE'}
-                size="sm"
-              />
-              <div className="min-w-0">
-                <div className="text-xs font-semibold text-white truncate">
-                  {currentUser?.name || 'Samir Brahma'}
-                </div>
-                <div className="text-[10px] text-emerald-400 truncate flex items-center gap-1">
-                  <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 inline-block" />
-                  <span>Available</span>
+          {currentUser ? (
+            <button
+              onClick={() => setIsProfileOpen(true)}
+              className="w-full flex items-center justify-between p-2 rounded-xl hover:bg-white/5 border border-transparent hover:border-white/10 transition-all text-left"
+            >
+              <div className="flex items-center gap-2.5 min-w-0">
+                <Avatar
+                  name={currentUser.name}
+                  avatarUrl={currentUser.avatarUrl}
+                  status={currentUser.status || 'ONLINE'}
+                  size="sm"
+                />
+                <div className="min-w-0">
+                  <div className="text-xs font-semibold text-white truncate">
+                    {currentUser.name}
+                  </div>
+                  <div className="text-[10px] text-emerald-400 truncate flex items-center gap-1">
+                    <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 inline-block" />
+                    <span>{currentUser.status || 'Available'}</span>
+                  </div>
                 </div>
               </div>
-            </div>
 
-            <UserIcon className="w-4 h-4 text-slate-500" />
-          </button>
+              <UserIcon className="w-4 h-4 text-slate-500 shrink-0" />
+            </button>
+          ) : (
+            <button
+              onClick={() => setIsAuthModalOpen(true)}
+              className="w-full flex items-center justify-center gap-2 py-2 px-3 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-semibold shadow-md shadow-indigo-600/20 transition-all cursor-pointer"
+            >
+              <UserIcon className="w-4 h-4" />
+              <span>Sign In / Register</span>
+            </button>
+          )}
         </div>
       </aside>
     </>

@@ -1,3 +1,5 @@
+import fs from 'fs';
+import path from 'path';
 import { connect } from '@tidbcloud/serverless';
 import { prisma } from './prisma';
 import {
@@ -32,17 +34,23 @@ import { logActivity, emitRealtimeEvent, getActivityFeed } from './activity';
 const DATABASE_URL = process.env.DATABASE_URL || process.env.TIDB_DATABASE_URL;
 const TIDB_HOST = process.env.TIDB_HOST;
 
-const isPlaceholder = DATABASE_URL && (DATABASE_URL.includes('<USERNAME>') || DATABASE_URL.includes('<PASSWORD>'));
+export const isDatabaseConfigured = Boolean(
+  DATABASE_URL &&
+  !DATABASE_URL.includes('<USERNAME>') &&
+  !DATABASE_URL.includes('<PASSWORD>') &&
+  !DATABASE_URL.includes('username:password') &&
+  !DATABASE_URL.includes('YourPassword')
+);
 
 let tidbClient: ReturnType<typeof connect> | null = null;
 
-if (DATABASE_URL && !isPlaceholder) {
+if (isDatabaseConfigured && DATABASE_URL) {
   try {
     tidbClient = connect({ url: DATABASE_URL });
   } catch (err) {
     console.warn('[TiDB] Failed to connect using DATABASE_URL:', err);
   }
-} else if (TIDB_HOST && process.env.TIDB_USER && process.env.TIDB_PASSWORD) {
+} else if (isDatabaseConfigured && TIDB_HOST && process.env.TIDB_USER && process.env.TIDB_PASSWORD) {
   try {
     tidbClient = connect({
       host: TIDB_HOST,
@@ -55,8 +63,77 @@ if (DATABASE_URL && !isPlaceholder) {
   }
 }
 
+// ================= LOCAL DISK PERSISTENCE LAYER =================
+function getStoreFilePath(): string {
+  let dir = path.resolve(process.cwd(), '.devconnect-data');
+  if (path.basename(process.cwd()).toLowerCase() === 'frontend') {
+    dir = path.resolve(process.cwd(), '../.devconnect-data');
+  }
+  try {
+    if (!fs.existsSync(dir)) {
+      fs.mkdirSync(dir, { recursive: true });
+    }
+  } catch {}
+  return path.join(dir, 'local-store.json');
+}
+
+const STORE_FILE_PATH = getStoreFilePath();
+
+interface PersistentStoreData {
+  messages: Message[];
+  tasks: Task[];
+  bugs: Bug[];
+  attachments: Attachment[];
+  activity: ActivityLog[];
+  notifications: AppNotification[];
+  users: User[];
+  members: ProjectMember[];
+  projects?: Project[];
+}
+
+export function loadPersistedStore(): Partial<PersistentStoreData> | null {
+  try {
+    if (fs.existsSync(STORE_FILE_PATH)) {
+      const raw = fs.readFileSync(STORE_FILE_PATH, 'utf-8');
+      if (raw && raw.trim()) {
+        return JSON.parse(raw);
+      }
+    }
+  } catch (err) {
+    console.error('[Store] Error reading persistent store from disk:', err);
+  }
+  return null;
+}
+
+export function saveStoreToDisk() {
+  if (!globalThis.__devconnect_store) return;
+  try {
+    const data: PersistentStoreData = {
+      messages: globalThis.__devconnect_store.messages,
+      tasks: Array.from(globalThis.__devconnect_store.tasks.values()),
+      bugs: Array.from(globalThis.__devconnect_store.bugs.values()),
+      attachments: Array.from(globalThis.__devconnect_store.attachments.values()),
+      activity: globalThis.__devconnect_store.activity,
+      notifications: Array.from(globalThis.__devconnect_store.notifications.values()),
+      users: Array.from(globalThis.__devconnect_store.users.values()),
+      members: globalThis.__devconnect_store.members,
+      projects: Array.from(globalThis.__devconnect_store.projects.values()),
+    };
+    const json = JSON.stringify(data, null, 2);
+    const tmp = STORE_FILE_PATH + '.tmp';
+    fs.writeFileSync(tmp, json, 'utf-8');
+    try {
+      fs.renameSync(tmp, STORE_FILE_PATH);
+    } catch {
+      fs.writeFileSync(STORE_FILE_PATH, json, 'utf-8');
+    }
+  } catch (err) {
+    console.error('[Store] Error writing store to disk:', err);
+  }
+}
+
 // In-Memory Serverless Data Store (Stateful within node instances, initialized with rich seed data)
-// Uses globalThis to survive serverless HMR in dev and warmup
+// Uses globalThis to survive serverless HMR in dev and warmup, backed by disk persistence
 declare global {
   // eslint-disable-next-line no-var
   var __devconnect_store: {
@@ -74,36 +151,77 @@ declare global {
 }
 
 if (!globalThis.__devconnect_store) {
+  const persisted = loadPersistedStore();
+
   const usersMap = new Map<string, User>();
   INITIAL_USERS.forEach((u) => usersMap.set(u.id, { ...u }));
+  if (persisted?.users) {
+    persisted.users.forEach((u) => usersMap.set(u.id, { ...(usersMap.get(u.id) || {}), ...u }));
+  }
 
   const projectsMap = new Map<string, Project>();
   INITIAL_PROJECTS.forEach((p) => projectsMap.set(p.id, { ...p }));
+  if (persisted?.projects) {
+    persisted.projects.forEach((p) => projectsMap.set(p.id, { ...(projectsMap.get(p.id) || {}), ...p }));
+  }
 
   const tasksMap = new Map<string, Task>();
   INITIAL_TASKS.forEach((t) => tasksMap.set(t.id, { ...t }));
+  if (persisted?.tasks) {
+    persisted.tasks.forEach((t) => tasksMap.set(t.id, { ...t }));
+  }
 
   const bugsMap = new Map<string, Bug>();
   INITIAL_BUGS.forEach((b) => bugsMap.set(b.id, { ...b }));
+  if (persisted?.bugs) {
+    persisted.bugs.forEach((b) => bugsMap.set(b.id, { ...b }));
+  }
 
   const attachmentsMap = new Map<string, Attachment>();
   INITIAL_ATTACHMENTS.forEach((a) => attachmentsMap.set(a.id, { ...a }));
+  if (persisted?.attachments) {
+    persisted.attachments.forEach((a) => attachmentsMap.set(a.id, { ...a }));
+  }
 
   const notifsMap = new Map<string, AppNotification>();
   INITIAL_NOTIFICATIONS.forEach((n) => notifsMap.set(n.id, { ...n }));
+  if (persisted?.notifications) {
+    persisted.notifications.forEach((n) => notifsMap.set(n.id, { ...n }));
+  }
+
+  // Combine initial messages and persisted messages
+  // Ensure no duplicates by ID, preserving any sent messages
+  const messagesMap = new Map<string, Message>();
+  INITIAL_MESSAGES.forEach((m) => messagesMap.set(m.id, { ...m }));
+  if (persisted?.messages) {
+    persisted.messages.forEach((m) => messagesMap.set(m.id, { ...m }));
+  }
+  const messagesList = Array.from(messagesMap.values()).sort(
+    (a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime()
+  );
+
+  const activityList = persisted?.activity && persisted.activity.length > 0
+    ? [...persisted.activity]
+    : [...INITIAL_ACTIVITY];
+
+  const membersList = persisted?.members && persisted.members.length > 0
+    ? [...persisted.members]
+    : [...INITIAL_MEMBERS];
 
   globalThis.__devconnect_store = {
     users: usersMap,
     projects: projectsMap,
-    members: [...INITIAL_MEMBERS],
-    messages: [...INITIAL_MESSAGES],
+    members: membersList,
+    messages: messagesList,
     tasks: tasksMap,
     bugs: bugsMap,
     attachments: attachmentsMap,
-    activity: [...INITIAL_ACTIVITY],
+    activity: activityList,
     notifications: notifsMap,
     notificationPreferences: new Map(),
   };
+
+  saveStoreToDisk();
 }
 
 // Ensure newly added maps exist even if globalThis.__devconnect_store was already initialized earlier
@@ -128,7 +246,9 @@ export function getDbStatus() {
 
 // ================= USER OPERATIONS =================
 export async function getUsers(): Promise<User[]> {
-  return Array.from(store.users.values());
+  return Array.from(store.users.values()).filter(
+    (u) => !u.email.endsWith('@test.dev') && !u.email.endsWith('@example.com')
+  );
 }
 
 export async function getUserById(id: string): Promise<User | null> {
@@ -167,24 +287,26 @@ export async function getProjectsForUser(userId: string): Promise<Project[]> {
 }
 
 export async function getProjectById(id: string): Promise<Project | null> {
-  try {
-    const dbProj = await prisma.project.findUnique({
-      where: { id },
-    });
-    if (dbProj) {
-      return {
-        id: dbProj.id,
-        name: dbProj.name,
-        description: dbProj.description || '',
-        ownerId: dbProj.ownerId,
-        githubRepo: dbProj.githubRepo || undefined,
-        status: dbProj.status as any,
-        channels: dbProj.channels ? JSON.parse(dbProj.channels) : ['general', 'development', 'bugs', 'tasks', 'files', 'activity'],
-        createdAt: dbProj.createdAt.toISOString(),
-        updatedAt: dbProj.updatedAt.toISOString(),
-      };
-    }
-  } catch {}
+  if (isDatabaseConfigured) {
+    try {
+      const dbProj = await prisma.project.findUnique({
+        where: { id },
+      });
+      if (dbProj) {
+        return {
+          id: dbProj.id,
+          name: dbProj.name,
+          description: dbProj.description || '',
+          ownerId: dbProj.ownerId,
+          githubRepo: dbProj.githubRepo || undefined,
+          status: dbProj.status as any,
+          channels: dbProj.channels ? JSON.parse(dbProj.channels) : ['general', 'development', 'bugs', 'tasks', 'files', 'activity'],
+          createdAt: dbProj.createdAt.toISOString(),
+          updatedAt: dbProj.updatedAt.toISOString(),
+        };
+      }
+    } catch {}
+  }
   return store.projects.get(id) || null;
 }
 
@@ -220,6 +342,7 @@ export async function createProject(data: Omit<Project, 'id' | 'createdAt'> & { 
     timestamp: 'Just now',
   });
 
+  saveStoreToDisk();
   return newProject;
 }
 
@@ -232,6 +355,7 @@ export async function updateProject(id: string, updates: Partial<Project>): Prom
     updatedAt: new Date().toISOString(),
   };
   store.projects.set(id, updated);
+  saveStoreToDisk();
   return updated;
 }
 
@@ -244,36 +368,58 @@ export async function archiveProject(id: string): Promise<Project | null> {
     updatedAt: new Date().toISOString(),
   };
   store.projects.set(id, archived);
+  saveStoreToDisk();
   return archived;
 }
 
+export async function deleteProject(id: string): Promise<boolean> {
+  const current = store.projects.get(id);
+  if (!current) return false;
+  store.projects.delete(id);
+  store.members = store.members.filter((m) => m.projectId !== id);
+  for (const [taskId, task] of store.tasks.entries()) {
+    if (task.projectId === id) store.tasks.delete(taskId);
+  }
+  for (const [bugId, bug] of store.bugs.entries()) {
+    if (bug.projectId === id) store.bugs.delete(bugId);
+  }
+  for (const [attId, att] of store.attachments.entries()) {
+    if (att.projectId === id) store.attachments.delete(attId);
+  }
+  store.activity = store.activity.filter((act) => act.projectId !== id);
+  saveStoreToDisk();
+  return true;
+}
+
 export async function getProjectMembers(projectId: string): Promise<ProjectMember[]> {
-  try {
-    const dbMembers = await prisma.projectMember.findMany({
-      where: { projectId },
-      include: { user: true },
-    });
-    if (dbMembers && dbMembers.length > 0) {
-      return dbMembers.map((m) => ({
-        id: m.id,
-        projectId: m.projectId,
-        userId: m.userId,
-        role: m.role as any,
-        joinedAt: m.joinedAt.toISOString(),
-        user: m.user
-          ? {
-              id: m.user.id,
-              name: m.user.name,
-              email: m.user.email,
-              avatarUrl: m.user.avatarUrl || '',
-              title: m.user.headline || 'Developer',
-              skills: [],
-              status: m.user.status as any,
-            }
-          : store.users.get(m.userId),
-      }));
-    }
-  } catch {}
+  if (isDatabaseConfigured) {
+    try {
+      const dbMembers = await prisma.projectMember.findMany({
+        where: { projectId },
+        include: { user: true },
+      });
+      if (dbMembers && dbMembers.length > 0) {
+        return dbMembers.map((m) => ({
+          id: m.id,
+          projectId: m.projectId,
+          userId: m.userId,
+          role: m.role as any,
+          joinedAt: m.joinedAt.toISOString(),
+          user: m.user
+            ? {
+                id: m.user.id,
+                name: m.user.name,
+                email: m.user.email,
+                avatarUrl: m.user.avatarUrl || '',
+                title: m.user.headline || 'Developer',
+                skills: [],
+                status: m.user.status as any,
+              }
+            : store.users.get(m.userId),
+        }));
+      }
+    } catch {}
+  }
   const members = store.members.filter((m) => m.projectId === projectId);
   return members.map((m) => ({
     ...m,
@@ -282,44 +428,47 @@ export async function getProjectMembers(projectId: string): Promise<ProjectMembe
 }
 
 export async function addProjectMember(projectId: string, userId: string, role: ProjectMember['role']): Promise<ProjectMember> {
-  try {
-    const dbMember = await prisma.projectMember.upsert({
-      where: {
-        projectId_userId: { projectId, userId },
-      },
-      update: { role },
-      create: { projectId, userId, role },
-      include: { user: true },
-    });
-    if (dbMember) {
-      const formatted: ProjectMember = {
-        id: dbMember.id,
-        projectId: dbMember.projectId,
-        userId: dbMember.userId,
-        role: dbMember.role as any,
-        joinedAt: dbMember.joinedAt.toISOString(),
-        user: dbMember.user
-          ? {
-              id: dbMember.user.id,
-              name: dbMember.user.name,
-              email: dbMember.user.email,
-              avatarUrl: dbMember.user.avatarUrl || '',
-              title: dbMember.user.headline || 'Developer',
-              skills: [],
-              status: dbMember.user.status as any,
-            }
-          : store.users.get(userId),
-      };
-      const idx = store.members.findIndex((m) => m.projectId === projectId && m.userId === userId);
-      if (idx !== -1) store.members[idx] = formatted;
-      else store.members.push(formatted);
-      return formatted;
-    }
-  } catch {}
+  if (isDatabaseConfigured) {
+    try {
+      const dbMember = await prisma.projectMember.upsert({
+        where: {
+          projectId_userId: { projectId, userId },
+        },
+        update: { role },
+        create: { projectId, userId, role },
+        include: { user: true },
+      });
+      if (dbMember) {
+        const formatted: ProjectMember = {
+          id: dbMember.id,
+          projectId: dbMember.projectId,
+          userId: dbMember.userId,
+          role: dbMember.role as any,
+          joinedAt: dbMember.joinedAt.toISOString(),
+          user: dbMember.user
+            ? {
+                id: dbMember.user.id,
+                name: dbMember.user.name,
+                email: dbMember.user.email,
+                avatarUrl: dbMember.user.avatarUrl || '',
+                title: dbMember.user.headline || 'Developer',
+                skills: [],
+                status: dbMember.user.status as any,
+              }
+            : store.users.get(userId),
+        };
+        const idx = store.members.findIndex((m) => m.projectId === projectId && m.userId === userId);
+        if (idx !== -1) store.members[idx] = formatted;
+        else store.members.push(formatted);
+        return formatted;
+      }
+    } catch {}
+  }
 
   const existing = store.members.find((m) => m.projectId === projectId && m.userId === userId);
   if (existing) {
     existing.role = role;
+    saveStoreToDisk();
     return { ...existing, user: store.users.get(userId) };
   }
   const newMember: ProjectMember = {
@@ -330,6 +479,7 @@ export async function addProjectMember(projectId: string, userId: string, role: 
     joinedAt: new Date().toISOString(),
   };
   store.members.push(newMember);
+  saveStoreToDisk();
   return { ...newMember, user: store.users.get(userId) };
 }
 
@@ -338,23 +488,25 @@ export async function updateProjectMemberRole(
   memberIdOrUserId: string,
   newRole: ProjectRole
 ): Promise<ProjectMember | null> {
-  try {
-    const dbMember = await prisma.projectMember.update({
-      where: { id: memberIdOrUserId },
-      data: { role: newRole },
-      include: { user: true },
-    });
-    if (dbMember) {
-      const updated: ProjectMember = {
-        id: dbMember.id,
-        projectId: dbMember.projectId,
-        userId: dbMember.userId,
-        role: dbMember.role as any,
-        joinedAt: dbMember.joinedAt.toISOString(),
-      };
-      return updated;
-    }
-  } catch {}
+  if (isDatabaseConfigured) {
+    try {
+      const dbMember = await prisma.projectMember.update({
+        where: { id: memberIdOrUserId },
+        data: { role: newRole },
+        include: { user: true },
+      });
+      if (dbMember) {
+        const updated: ProjectMember = {
+          id: dbMember.id,
+          projectId: dbMember.projectId,
+          userId: dbMember.userId,
+          role: dbMember.role as any,
+          joinedAt: dbMember.joinedAt.toISOString(),
+        };
+        return updated;
+      }
+    } catch {}
+  }
 
   const member = store.members.find(
     (m) => m.projectId === projectId && (m.id === memberIdOrUserId || m.userId === memberIdOrUserId)
@@ -369,24 +521,27 @@ export async function removeProjectMember(
   memberIdOrUserId: string
 ): Promise<boolean> {
   let dbDeleted = false;
-  try {
-    const res = await prisma.projectMember.deleteMany({
-      where: {
-        projectId,
-        OR: [
-          { id: memberIdOrUserId },
-          { userId: memberIdOrUserId },
-        ],
-      },
-    });
-    if (res.count > 0) dbDeleted = true;
-  } catch {}
+  if (isDatabaseConfigured) {
+    try {
+      const res = await prisma.projectMember.deleteMany({
+        where: {
+          projectId,
+          OR: [
+            { id: memberIdOrUserId },
+            { userId: memberIdOrUserId },
+          ],
+        },
+      });
+      if (res.count > 0) dbDeleted = true;
+    } catch {}
+  }
 
   const index = store.members.findIndex(
     (m) => m.projectId === projectId && (m.id === memberIdOrUserId || m.userId === memberIdOrUserId)
   );
   if (index !== -1) {
     store.members.splice(index, 1);
+    saveStoreToDisk();
     return true;
   }
   return dbDeleted;
@@ -398,7 +553,8 @@ export async function getMessages(filters: {
   conversationId?: string;
   channel?: string;
 }): Promise<Message[]> {
-  try {
+  if (isDatabaseConfigured) {
+    try {
     const whereClause: any = {
       deletedAt: null,
     };
@@ -610,6 +766,21 @@ export async function getMessages(filters: {
   } catch (err) {
     console.error('Error fetching messages from TiDB:', err);
   }
+}
+
+  if (fs.existsSync(STORE_FILE_PATH)) {
+    try {
+      const persisted = loadPersistedStore();
+      if (persisted?.messages && persisted.messages.length > store.messages.length) {
+        const map = new Map<string, Message>();
+        store.messages.forEach((m) => map.set(m.id, m));
+        persisted.messages.forEach((m) => map.set(m.id, m));
+        store.messages = Array.from(map.values()).sort(
+          (a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime()
+        );
+      }
+    } catch {}
+  }
 
   return store.messages
     .filter((msg) => {
@@ -627,7 +798,10 @@ export async function getMessages(filters: {
         return true;
       }
       if (filters.conversationId) {
-        return msg.conversationId === filters.conversationId;
+        if (msg.conversationId === filters.conversationId) return true;
+        const targetParts = filters.conversationId.replace('dm_', '').split('_').sort().join('_');
+        const msgParts = (msg.conversationId || '').replace('dm_', '').split('_').sort().join('_');
+        return targetParts.length > 0 && targetParts === msgParts;
       }
       return false;
     })
@@ -646,105 +820,107 @@ export async function createMessage(msgData: Omit<Message, 'id' | 'createdAt'>):
     reactions: [],
   };
 
-  try {
-    // 1. Ensure sender user exists in TiDB
-    if (msgData.senderId) {
-      const dbSender = await prisma.user.findUnique({ where: { id: msgData.senderId } });
-      if (!dbSender) {
-        const storeSender = store.users.get(msgData.senderId);
-        const safeStatus =
-          storeSender?.status === 'AWAY'
-            ? 'AWAY'
-            : storeSender?.status === 'OFFLINE'
-            ? 'OFFLINE'
-            : 'AVAILABLE';
-        await prisma.user.create({
-          data: {
-            id: msgData.senderId,
-            email: storeSender?.email || `${msgData.senderId}@zettadev.io`,
-            name: storeSender?.name || 'Developer',
-            avatarUrl: storeSender?.avatarUrl || '',
-            headline: storeSender?.headline || 'Developer',
-            status: safeStatus,
-          },
-        });
+  if (isDatabaseConfigured) {
+    try {
+      // 1. Ensure sender user exists in TiDB
+      if (msgData.senderId) {
+        const dbSender = await prisma.user.findUnique({ where: { id: msgData.senderId } });
+        if (!dbSender) {
+          const storeSender = store.users.get(msgData.senderId);
+          const safeStatus =
+            storeSender?.status === 'AWAY'
+              ? 'AWAY'
+              : storeSender?.status === 'OFFLINE'
+              ? 'OFFLINE'
+              : 'AVAILABLE';
+          await prisma.user.create({
+            data: {
+              id: msgData.senderId,
+              email: storeSender?.email || `${msgData.senderId}@zettadev.io`,
+              name: storeSender?.name || 'Developer',
+              avatarUrl: storeSender?.avatarUrl || '',
+              headline: storeSender?.headline || 'Developer',
+              status: safeStatus,
+            },
+          });
+        }
       }
-    }
 
-    // 2. Ensure project exists in TiDB if linked
-    if (msgData.projectId) {
-      const dbProj = await prisma.project.findUnique({ where: { id: msgData.projectId } });
-      if (!dbProj) {
-        const storeProj = store.projects.get(msgData.projectId);
-        await prisma.project.create({
-          data: {
-            id: msgData.projectId,
-            name: storeProj?.name || 'Dev Project',
-            description: storeProj?.description || '',
-            ownerId: storeProj?.ownerId || msgData.senderId || 'user_samir',
-            status: 'ACTIVE',
-          },
-        });
+      // 2. Ensure project exists in TiDB if linked
+      if (msgData.projectId) {
+        const dbProj = await prisma.project.findUnique({ where: { id: msgData.projectId } });
+        if (!dbProj) {
+          const storeProj = store.projects.get(msgData.projectId);
+          await prisma.project.create({
+            data: {
+              id: msgData.projectId,
+              name: storeProj?.name || 'Dev Project',
+              description: storeProj?.description || '',
+              ownerId: storeProj?.ownerId || msgData.senderId || 'user_creator',
+              status: 'ACTIVE',
+            },
+          });
+        }
       }
-    }
 
-    // 3. Ensure conversation exists in TiDB if linked
-    if (msgData.conversationId) {
-      const dbConv = await prisma.conversation.findUnique({ where: { id: msgData.conversationId } });
-      if (!dbConv) {
-        await prisma.conversation.create({
-          data: {
-            id: msgData.conversationId,
-            type: msgData.projectId ? 'PROJECT_CHANNEL' : 'DIRECT',
-            projectId: msgData.projectId || null,
-          },
-        });
+      // 3. Ensure conversation exists in TiDB if linked
+      if (msgData.conversationId) {
+        const dbConv = await prisma.conversation.findUnique({ where: { id: msgData.conversationId } });
+        if (!dbConv) {
+          await prisma.conversation.create({
+            data: {
+              id: msgData.conversationId,
+              type: msgData.projectId ? 'PROJECT_CHANNEL' : 'DIRECT',
+              projectId: msgData.projectId || null,
+            },
+          });
+        }
       }
-    }
 
-    const msgMeta = msgData.metadata || (
-      msgData.codeLanguage || msgData.codeFilename || msgData.taskData || msgData.bugData
-        ? JSON.stringify({
-            codeLanguage: msgData.codeLanguage,
-            codeFilename: msgData.codeFilename,
-            ...(msgData.taskData ? { taskId: msgData.taskData.id, ...msgData.taskData } : {}),
-            ...(msgData.bugData ? { bugId: msgData.bugData.id, ...msgData.bugData } : {}),
-          })
-        : null
-    );
+      const msgMeta = msgData.metadata || (
+        msgData.codeLanguage || msgData.codeFilename || msgData.taskData || msgData.bugData
+          ? JSON.stringify({
+              codeLanguage: msgData.codeLanguage,
+              codeFilename: msgData.codeFilename,
+              ...(msgData.taskData ? { taskId: msgData.taskData.id, ...msgData.taskData } : {}),
+              ...(msgData.bugData ? { bugId: msgData.bugData.id, ...msgData.bugData } : {}),
+            })
+          : null
+      );
 
-    await prisma.message.create({
-      data: {
-        id,
-        conversationId: msgData.conversationId || null,
-        projectId: msgData.projectId || null,
-        channel: msgData.channel || 'general',
-        senderId: msgData.senderId,
-        content: msgData.content,
-        messageType: msgData.messageType || 'TEXT',
-        metadata: msgMeta,
-        replyToMessageId: msgData.replyToMessageId || null,
-      },
-    });
+      await prisma.message.create({
+        data: {
+          id,
+          conversationId: msgData.conversationId || null,
+          projectId: msgData.projectId || null,
+          channel: msgData.channel || 'general',
+          senderId: msgData.senderId,
+          content: msgData.content,
+          messageType: msgData.messageType || 'TEXT',
+          metadata: msgMeta,
+          replyToMessageId: msgData.replyToMessageId || null,
+        },
+      });
 
-    if (msgData.taskData?.id) {
-      try {
-        await prisma.task.update({
-          where: { id: msgData.taskData.id },
-          data: { messageId: id },
-        });
-      } catch {}
+      if (msgData.taskData?.id) {
+        try {
+          await prisma.task.update({
+            where: { id: msgData.taskData.id },
+            data: { messageId: id },
+          });
+        } catch {}
+      }
+      if (msgData.bugData?.id) {
+        try {
+          await prisma.bug.update({
+            where: { id: msgData.bugData.id },
+            data: { messageId: id },
+          });
+        } catch {}
+      }
+    } catch (err) {
+      console.error('Error persisting message in TiDB:', err);
     }
-    if (msgData.bugData?.id) {
-      try {
-        await prisma.bug.update({
-          where: { id: msgData.bugData.id },
-          data: { messageId: id },
-        });
-      } catch {}
-    }
-  } catch (err) {
-    console.error('Error persisting message in TiDB:', err);
   }
 
   store.messages.push(newMsg);
@@ -787,9 +963,24 @@ export async function createMessage(msgData: Omit<Message, 'id' | 'createdAt'>):
     }
   }
 
+  saveStoreToDisk();
+
   return {
     ...newMsg,
     sender: store.users.get(newMsg.senderId),
+  };
+}
+
+export async function updateMessage(messageId: string, content: string): Promise<Message | null> {
+  const msg = store.messages.find((m) => m.id === messageId);
+  if (!msg) return null;
+  msg.content = content.trim();
+  msg.isEdited = true;
+  msg.updatedAt = new Date().toISOString();
+  saveStoreToDisk();
+  return {
+    ...msg,
+    sender: store.users.get(msg.senderId),
   };
 }
 
@@ -819,6 +1010,8 @@ export async function toggleMessageReaction(messageId: string, userId: string, e
     });
   }
 
+  saveStoreToDisk();
+
   return {
     ...msg,
     sender: store.users.get(msg.senderId),
@@ -826,69 +1019,74 @@ export async function toggleMessageReaction(messageId: string, userId: string, e
 }
 
 export async function deleteMessage(messageId: string): Promise<boolean> {
-  try {
-    await prisma.message.update({
-      where: { id: messageId },
-      data: { deletedAt: new Date() },
-    });
-  } catch {}
+  if (isDatabaseConfigured) {
+    try {
+      await prisma.message.update({
+        where: { id: messageId },
+        data: { deletedAt: new Date() },
+      });
+    } catch {}
+  }
   const idx = store.messages.findIndex((m) => m.id === messageId);
   if (idx !== -1) {
     store.messages.splice(idx, 1);
+    saveStoreToDisk();
   }
   return true;
 }
 
 // ================= TASK OPERATIONS =================
 export async function getTasks(projectId: string): Promise<Task[]> {
-  try {
-    const dbTasks = await prisma.task.findMany({
-      where: { projectId },
-      include: {
-        assignee: true,
-        creator: true,
-      },
-      orderBy: { createdAt: 'desc' },
-    });
-    if (dbTasks && dbTasks.length > 0) {
-      return dbTasks.map((t) => ({
-        id: t.id,
-        projectId: t.projectId,
-        messageId: t.messageId || undefined,
-        title: t.title,
-        description: t.description || undefined,
-        priority: t.priority as any,
-        status: t.status as any,
-        assignedTo: t.assignedTo || undefined,
-        assigneeUser: t.assignee
-          ? {
-              id: t.assignee.id,
-              name: t.assignee.name,
-              email: t.assignee.email,
-              avatarUrl: t.assignee.avatarUrl || '',
-              title: t.assignee.headline || 'Developer',
-              skills: [],
-              status: t.assignee.status as any,
-            }
-          : (t.assignedTo ? store.users.get(t.assignedTo) : undefined),
-        createdBy: t.createdBy,
-        creatorUser: t.creator
-          ? {
-              id: t.creator.id,
-              name: t.creator.name,
-              email: t.creator.email,
-              avatarUrl: t.creator.avatarUrl || '',
-              title: t.creator.headline || 'Developer',
-              skills: [],
-              status: t.creator.status as any,
-            }
-          : store.users.get(t.createdBy),
-        dueDate: t.dueDate ? t.dueDate.toISOString() : undefined,
-        createdAt: t.createdAt.toISOString(),
-        updatedAt: t.updatedAt.toISOString(),
-      }));
-    }
-  } catch (err) {}
+  if (isDatabaseConfigured) {
+    try {
+      const dbTasks = await prisma.task.findMany({
+        where: { projectId },
+        include: {
+          assignee: true,
+          creator: true,
+        },
+        orderBy: { createdAt: 'desc' },
+      });
+      if (dbTasks && dbTasks.length > 0) {
+        return dbTasks.map((t) => ({
+          id: t.id,
+          projectId: t.projectId,
+          messageId: t.messageId || undefined,
+          title: t.title,
+          description: t.description || undefined,
+          priority: t.priority as any,
+          status: t.status as any,
+          assignedTo: t.assignedTo || undefined,
+          assigneeUser: t.assignee
+            ? {
+                id: t.assignee.id,
+                name: t.assignee.name,
+                email: t.assignee.email,
+                avatarUrl: t.assignee.avatarUrl || '',
+                title: t.assignee.headline || 'Developer',
+                skills: [],
+                status: t.assignee.status as any,
+              }
+            : (t.assignedTo ? store.users.get(t.assignedTo) : undefined),
+          createdBy: t.createdBy,
+          creatorUser: t.creator
+            ? {
+                id: t.creator.id,
+                name: t.creator.name,
+                email: t.creator.email,
+                avatarUrl: t.creator.avatarUrl || '',
+                title: t.creator.headline || 'Developer',
+                skills: [],
+                status: t.creator.status as any,
+              }
+            : store.users.get(t.createdBy),
+          dueDate: t.dueDate ? t.dueDate.toISOString() : undefined,
+          createdAt: t.createdAt.toISOString(),
+          updatedAt: t.updatedAt.toISOString(),
+        }));
+      }
+    } catch (err) {}
+  }
 
   const tasks = Array.from(store.tasks.values()).filter((t) => t.projectId === projectId);
   return tasks.map((t) => ({
@@ -902,62 +1100,64 @@ export async function createTask(taskData: Omit<Task, 'id' | 'createdAt'>): Prom
   let createdTask: Task | null = null;
   const parsedDueDate = taskData.dueDate && !isNaN(Date.parse(taskData.dueDate)) ? new Date(taskData.dueDate) : null;
 
-  try {
-    const dbTask = await prisma.task.create({
-      data: {
-        projectId: taskData.projectId,
-        messageId: taskData.messageId || null,
-        title: taskData.title,
-        description: taskData.description || null,
-        priority: taskData.priority || 'MEDIUM',
-        status: taskData.status || 'TODO',
-        assignedTo: taskData.assignedTo || null,
-        createdBy: taskData.createdBy || 'user_samir',
-        dueDate: parsedDueDate,
-      },
-      include: {
-        assignee: true,
-        creator: true,
-      },
-    });
+  if (isDatabaseConfigured) {
+    try {
+      const dbTask = await prisma.task.create({
+        data: {
+          projectId: taskData.projectId,
+          messageId: taskData.messageId || null,
+          title: taskData.title,
+          description: taskData.description || null,
+          priority: taskData.priority || 'MEDIUM',
+          status: taskData.status || 'TODO',
+          assignedTo: taskData.assignedTo || null,
+          createdBy: taskData.createdBy || 'user_creator',
+          dueDate: parsedDueDate,
+        },
+        include: {
+          assignee: true,
+          creator: true,
+        },
+      });
 
-    createdTask = {
-      id: dbTask.id,
-      projectId: dbTask.projectId,
-      messageId: dbTask.messageId || undefined,
-      title: dbTask.title,
-      description: dbTask.description || undefined,
-      priority: dbTask.priority as any,
-      status: dbTask.status as any,
-      assignedTo: dbTask.assignedTo || undefined,
-      assigneeUser: dbTask.assignee
-        ? {
-            id: dbTask.assignee.id,
-            name: dbTask.assignee.name,
-            email: dbTask.assignee.email,
-            avatarUrl: dbTask.assignee.avatarUrl || '',
-            title: dbTask.assignee.headline || 'Developer',
-            skills: [],
-            status: dbTask.assignee.status as any,
-          }
-        : (dbTask.assignedTo ? store.users.get(dbTask.assignedTo) : undefined),
-      createdBy: dbTask.createdBy,
-      creatorUser: dbTask.creator
-        ? {
-            id: dbTask.creator.id,
-            name: dbTask.creator.name,
-            email: dbTask.creator.email,
-            avatarUrl: dbTask.creator.avatarUrl || '',
-            title: dbTask.creator.headline || 'Developer',
-            skills: [],
-            status: dbTask.creator.status as any,
-          }
-        : store.users.get(dbTask.createdBy),
-      dueDate: dbTask.dueDate ? dbTask.dueDate.toISOString() : (taskData.dueDate || undefined),
-      createdAt: dbTask.createdAt.toISOString(),
-      updatedAt: dbTask.updatedAt.toISOString(),
-    };
-  } catch (err) {}
+      createdTask = {
+        id: dbTask.id,
+        projectId: dbTask.projectId,
+        messageId: dbTask.messageId || undefined,
+        title: dbTask.title,
+        description: dbTask.description || undefined,
+        priority: dbTask.priority as any,
+        status: dbTask.status as any,
+        assignedTo: dbTask.assignedTo || undefined,
+        assigneeUser: dbTask.assignee
+          ? {
+              id: dbTask.assignee.id,
+              name: dbTask.assignee.name,
+              email: dbTask.assignee.email,
+              avatarUrl: dbTask.assignee.avatarUrl || '',
+              title: dbTask.assignee.headline || 'Developer',
+              skills: [],
+              status: dbTask.assignee.status as any,
+            }
+          : (dbTask.assignedTo ? store.users.get(dbTask.assignedTo) : undefined),
+        createdBy: dbTask.createdBy,
+        creatorUser: dbTask.creator
+          ? {
+              id: dbTask.creator.id,
+              name: dbTask.creator.name,
+              email: dbTask.creator.email,
+              avatarUrl: dbTask.creator.avatarUrl || '',
+              title: dbTask.creator.headline || 'Developer',
+              skills: [],
+              status: dbTask.creator.status as any,
+            }
+          : store.users.get(dbTask.createdBy),
+        dueDate: dbTask.dueDate ? dbTask.dueDate.toISOString() : (taskData.dueDate || undefined),
+        createdAt: dbTask.createdAt.toISOString(),
+        updatedAt: dbTask.updatedAt.toISOString(),
+      };
+    } catch (err) {}
+  }
 
   if (!createdTask) {
     const id = `task_${Date.now()}`;
@@ -997,6 +1197,8 @@ export async function createTask(taskData: Omit<Task, 'id' | 'createdAt'>): Prom
     action: 'CREATED',
   });
 
+  saveStoreToDisk();
+
   return createdTask;
 }
 
@@ -1005,87 +1207,89 @@ export async function updateTask(id: string, partial: Partial<Task>): Promise<Ta
   const parsedDueDate = partial.dueDate && !isNaN(Date.parse(partial.dueDate)) ? new Date(partial.dueDate) : undefined;
 
   let updatedTask: Task | null = null;
-  try {
-    const updateData: any = {};
-    if (partial.title !== undefined) updateData.title = partial.title;
-    if (partial.description !== undefined) updateData.description = partial.description;
-    if (partial.priority !== undefined) updateData.priority = partial.priority;
-    if (partial.status !== undefined) updateData.status = partial.status;
-    if (partial.assignedTo !== undefined) updateData.assignedTo = partial.assignedTo;
-    if (parsedDueDate !== undefined) updateData.dueDate = parsedDueDate;
-
-    let targetDbId = id;
+  if (isDatabaseConfigured) {
     try {
-      const dbTask = await prisma.task.update({
-        where: { id: targetDbId },
-        data: updateData,
-        include: { assignee: true, creator: true },
-      });
-      targetDbId = dbTask.id;
-    } catch {
-      // If not found by direct ID, try finding by messageId or stripped task_ prefix
-      const possibleMsgId = id.replace(/^task_/, '');
-      const foundTask = await prisma.task.findFirst({
-        where: {
-          OR: [
-            { messageId: id },
-            { messageId: possibleMsgId },
-          ],
-        },
-      });
-      if (foundTask) {
-        targetDbId = foundTask.id;
-        await prisma.task.update({
+      const updateData: any = {};
+      if (partial.title !== undefined) updateData.title = partial.title;
+      if (partial.description !== undefined) updateData.description = partial.description;
+      if (partial.priority !== undefined) updateData.priority = partial.priority;
+      if (partial.status !== undefined) updateData.status = partial.status;
+      if (partial.assignedTo !== undefined) updateData.assignedTo = partial.assignedTo;
+      if (parsedDueDate !== undefined) updateData.dueDate = parsedDueDate;
+
+      let targetDbId = id;
+      try {
+        const dbTask = await prisma.task.update({
           where: { id: targetDbId },
           data: updateData,
+          include: { assignee: true, creator: true },
         });
+        targetDbId = dbTask.id;
+      } catch {
+        // If not found by direct ID, try finding by messageId or stripped task_ prefix
+        const possibleMsgId = id.replace(/^task_/, '');
+        const foundTask = await prisma.task.findFirst({
+          where: {
+            OR: [
+              { messageId: id },
+              { messageId: possibleMsgId },
+            ],
+          },
+        });
+        if (foundTask) {
+          targetDbId = foundTask.id;
+          await prisma.task.update({
+            where: { id: targetDbId },
+            data: updateData,
+          });
+        }
       }
-    }
 
-    const dbTask = await prisma.task.findUnique({
-      where: { id: targetDbId },
-      include: { assignee: true, creator: true },
-    });
+      const dbTask = await prisma.task.findUnique({
+        where: { id: targetDbId },
+        include: { assignee: true, creator: true },
+      });
 
-    if (dbTask) {
-      updatedTask = {
-        id: dbTask.id,
-        projectId: dbTask.projectId,
-        messageId: dbTask.messageId || undefined,
-        title: dbTask.title,
-        description: dbTask.description || undefined,
-        priority: dbTask.priority as any,
-        status: dbTask.status as any,
-        assignedTo: dbTask.assignedTo || undefined,
-        assigneeUser: dbTask.assignee
-          ? {
-              id: dbTask.assignee.id,
-              name: dbTask.assignee.name,
-              email: dbTask.assignee.email,
-              avatarUrl: dbTask.assignee.avatarUrl || '',
-              title: dbTask.assignee.headline || 'Developer',
-              skills: [],
-              status: dbTask.assignee.status as any,
-            }
-          : (dbTask.assignedTo ? store.users.get(dbTask.assignedTo) : undefined),
-        createdBy: dbTask.createdBy,
-        creatorUser: dbTask.creator
-          ? {
-              id: dbTask.creator.id,
-              name: dbTask.creator.name,
-              email: dbTask.creator.email,
-              avatarUrl: dbTask.creator.avatarUrl || '',
-              title: dbTask.creator.headline || 'Developer',
-              skills: [],
-              status: dbTask.creator.status as any,
-            }
-          : store.users.get(dbTask.createdBy),
-        dueDate: dbTask.dueDate ? dbTask.dueDate.toISOString() : undefined,
-        createdAt: dbTask.createdAt.toISOString(),
-        updatedAt: dbTask.updatedAt.toISOString(),
-      };
-    }
-  } catch (err) {}
+      if (dbTask) {
+        updatedTask = {
+          id: dbTask.id,
+          projectId: dbTask.projectId,
+          messageId: dbTask.messageId || undefined,
+          title: dbTask.title,
+          description: dbTask.description || undefined,
+          priority: dbTask.priority as any,
+          status: dbTask.status as any,
+          assignedTo: dbTask.assignedTo || undefined,
+          assigneeUser: dbTask.assignee
+            ? {
+                id: dbTask.assignee.id,
+                name: dbTask.assignee.name,
+                email: dbTask.assignee.email,
+                avatarUrl: dbTask.assignee.avatarUrl || '',
+                title: dbTask.assignee.headline || 'Developer',
+                skills: [],
+                status: dbTask.assignee.status as any,
+              }
+            : (dbTask.assignedTo ? store.users.get(dbTask.assignedTo) : undefined),
+          createdBy: dbTask.createdBy,
+          creatorUser: dbTask.creator
+            ? {
+                id: dbTask.creator.id,
+                name: dbTask.creator.name,
+                email: dbTask.creator.email,
+                avatarUrl: dbTask.creator.avatarUrl || '',
+                title: dbTask.creator.headline || 'Developer',
+                skills: [],
+                status: dbTask.creator.status as any,
+              }
+            : store.users.get(dbTask.createdBy),
+          dueDate: dbTask.dueDate ? dbTask.dueDate.toISOString() : undefined,
+          createdAt: dbTask.createdAt.toISOString(),
+          updatedAt: dbTask.updatedAt.toISOString(),
+        };
+      }
+    } catch (err) {}
+  }
 
   if (!updatedTask) {
     if (!existing) return null;
@@ -1099,7 +1303,7 @@ export async function updateTask(id: string, partial: Partial<Task>): Promise<Ta
   }
 
   // Sync linked message metadata and in-memory store
-  if (updatedTask.messageId) {
+  if (isDatabaseConfigured && updatedTask.messageId) {
     try {
       const dbMsg = await prisma.message.findUnique({ where: { id: updatedTask.messageId } });
       if (dbMsg) {
@@ -1152,13 +1356,16 @@ export async function updateTask(id: string, partial: Partial<Task>): Promise<Ta
     action: 'UPDATED',
   });
 
+  saveStoreToDisk();
+
   return updatedTask;
 }
 
 // ================= BUG OPERATIONS =================
 export async function getBugs(projectId: string): Promise<Bug[]> {
-  try {
-    const dbBugs = await prisma.bug.findMany({
+  if (isDatabaseConfigured) {
+    try {
+      const dbBugs = await prisma.bug.findMany({
       where: { projectId },
       include: {
         assignee: true,
@@ -1205,6 +1412,7 @@ export async function getBugs(projectId: string): Promise<Bug[]> {
       }));
     }
   } catch (err) {}
+  }
 
   const bugs = Array.from(store.bugs.values()).filter((b) => b.projectId === projectId);
   return bugs.map((b) => ({
@@ -1217,62 +1425,64 @@ export async function getBugs(projectId: string): Promise<Bug[]> {
 export async function createBug(bugData: Omit<Bug, 'id' | 'createdAt'>): Promise<Bug> {
   let createdBug: Bug | null = null;
 
-  try {
-    const dbBug = await prisma.bug.create({
-      data: {
-        projectId: bugData.projectId,
-        messageId: bugData.messageId || null,
-        title: bugData.title,
-        description: bugData.description || null,
-        endpoint: bugData.endpoint || null,
-        priority: bugData.priority || 'HIGH',
-        status: bugData.status || 'OPEN',
-        assignedTo: bugData.assignedTo || null,
-        createdBy: bugData.createdBy || 'user_samir',
-      },
-      include: {
-        assignee: true,
-        reporter: true,
-      },
-    });
+  if (isDatabaseConfigured) {
+    try {
+      const dbBug = await prisma.bug.create({
+        data: {
+          projectId: bugData.projectId,
+          messageId: bugData.messageId || null,
+          title: bugData.title,
+          description: bugData.description || null,
+          endpoint: bugData.endpoint || null,
+          priority: bugData.priority || 'HIGH',
+          status: bugData.status || 'OPEN',
+          assignedTo: bugData.assignedTo || null,
+          createdBy: bugData.createdBy || 'user_creator',
+        },
+        include: {
+          assignee: true,
+          reporter: true,
+        },
+      });
 
-    createdBug = {
-      id: dbBug.id,
-      projectId: dbBug.projectId,
-      messageId: dbBug.messageId || undefined,
-      title: dbBug.title,
-      description: dbBug.description || undefined,
-      endpoint: dbBug.endpoint || undefined,
-      priority: dbBug.priority as any,
-      status: dbBug.status as any,
-      assignedTo: dbBug.assignedTo || undefined,
-      assigneeUser: dbBug.assignee
-        ? {
-            id: dbBug.assignee.id,
-            name: dbBug.assignee.name,
-            email: dbBug.assignee.email,
-            avatarUrl: dbBug.assignee.avatarUrl || '',
-            title: dbBug.assignee.headline || 'Developer',
-            skills: [],
-            status: dbBug.assignee.status as any,
-          }
-        : (dbBug.assignedTo ? store.users.get(dbBug.assignedTo) : undefined),
-      createdBy: dbBug.createdBy,
-      creatorUser: dbBug.reporter
-        ? {
-            id: dbBug.reporter.id,
-            name: dbBug.reporter.name,
-            email: dbBug.reporter.email,
-            avatarUrl: dbBug.reporter.avatarUrl || '',
-            title: dbBug.reporter.headline || 'Developer',
-            skills: [],
-            status: dbBug.reporter.status as any,
-          }
-        : store.users.get(dbBug.createdBy),
-      createdAt: dbBug.createdAt.toISOString(),
-      updatedAt: dbBug.updatedAt.toISOString(),
-    };
-  } catch (err) {}
+      createdBug = {
+        id: dbBug.id,
+        projectId: dbBug.projectId,
+        messageId: dbBug.messageId || undefined,
+        title: dbBug.title,
+        description: dbBug.description || undefined,
+        endpoint: dbBug.endpoint || undefined,
+        priority: dbBug.priority as any,
+        status: dbBug.status as any,
+        assignedTo: dbBug.assignedTo || undefined,
+        assigneeUser: dbBug.assignee
+          ? {
+              id: dbBug.assignee.id,
+              name: dbBug.assignee.name,
+              email: dbBug.assignee.email,
+              avatarUrl: dbBug.assignee.avatarUrl || '',
+              title: dbBug.assignee.headline || 'Developer',
+              skills: [],
+              status: dbBug.assignee.status as any,
+            }
+          : (dbBug.assignedTo ? store.users.get(dbBug.assignedTo) : undefined),
+        createdBy: dbBug.createdBy,
+        creatorUser: dbBug.reporter
+          ? {
+              id: dbBug.reporter.id,
+              name: dbBug.reporter.name,
+              email: dbBug.reporter.email,
+              avatarUrl: dbBug.reporter.avatarUrl || '',
+              title: dbBug.reporter.headline || 'Developer',
+              skills: [],
+              status: dbBug.reporter.status as any,
+            }
+          : store.users.get(dbBug.createdBy),
+        createdAt: dbBug.createdAt.toISOString(),
+        updatedAt: dbBug.updatedAt.toISOString(),
+      };
+    } catch (err) {}
+  }
 
   if (!createdBug) {
     const id = `bug_${Date.now()}`;
@@ -1312,6 +1522,8 @@ export async function createBug(bugData: Omit<Bug, 'id' | 'createdAt'>): Promise
     action: 'CREATED',
   });
 
+  saveStoreToDisk();
+
   return createdBug;
 }
 
@@ -1319,87 +1531,89 @@ export async function updateBug(id: string, partial: Partial<Bug>): Promise<Bug 
   const existing = store.bugs.get(id);
 
   let updatedBug: Bug | null = null;
-  try {
-    const updateData: any = {};
-    if (partial.title !== undefined) updateData.title = partial.title;
-    if (partial.description !== undefined) updateData.description = partial.description;
-    if (partial.endpoint !== undefined) updateData.endpoint = partial.endpoint;
-    if (partial.priority !== undefined) updateData.priority = partial.priority;
-    if (partial.status !== undefined) updateData.status = partial.status;
-    if (partial.assignedTo !== undefined) updateData.assignedTo = partial.assignedTo;
-
-    let targetDbId = id;
+  if (isDatabaseConfigured) {
     try {
-      const dbBug = await prisma.bug.update({
-        where: { id: targetDbId },
-        data: updateData,
-        include: { assignee: true, reporter: true },
-      });
-      targetDbId = dbBug.id;
-    } catch {
-      // If not found by direct ID, try finding by messageId or stripped bug_ prefix
-      const possibleMsgId = id.replace(/^bug_/, '');
-      const foundBug = await prisma.bug.findFirst({
-        where: {
-          OR: [
-            { messageId: id },
-            { messageId: possibleMsgId },
-          ],
-        },
-      });
-      if (foundBug) {
-        targetDbId = foundBug.id;
-        await prisma.bug.update({
+      const updateData: any = {};
+      if (partial.title !== undefined) updateData.title = partial.title;
+      if (partial.description !== undefined) updateData.description = partial.description;
+      if (partial.endpoint !== undefined) updateData.endpoint = partial.endpoint;
+      if (partial.priority !== undefined) updateData.priority = partial.priority;
+      if (partial.status !== undefined) updateData.status = partial.status;
+      if (partial.assignedTo !== undefined) updateData.assignedTo = partial.assignedTo;
+
+      let targetDbId = id;
+      try {
+        const dbBug = await prisma.bug.update({
           where: { id: targetDbId },
           data: updateData,
+          include: { assignee: true, reporter: true },
         });
+        targetDbId = dbBug.id;
+      } catch {
+        // If not found by direct ID, try finding by messageId or stripped bug_ prefix
+        const possibleMsgId = id.replace(/^bug_/, '');
+        const foundBug = await prisma.bug.findFirst({
+          where: {
+            OR: [
+              { messageId: id },
+              { messageId: possibleMsgId },
+            ],
+          },
+        });
+        if (foundBug) {
+          targetDbId = foundBug.id;
+          await prisma.bug.update({
+            where: { id: targetDbId },
+            data: updateData,
+          });
+        }
       }
-    }
 
-    const dbBug = await prisma.bug.findUnique({
-      where: { id: targetDbId },
-      include: { assignee: true, reporter: true },
-    });
+      const dbBug = await prisma.bug.findUnique({
+        where: { id: targetDbId },
+        include: { assignee: true, reporter: true },
+      });
 
-    if (dbBug) {
-      updatedBug = {
-        id: dbBug.id,
-        projectId: dbBug.projectId,
-        messageId: dbBug.messageId || undefined,
-        title: dbBug.title,
-        description: dbBug.description || undefined,
-        endpoint: dbBug.endpoint || undefined,
-        priority: dbBug.priority as any,
-        status: dbBug.status as any,
-        assignedTo: dbBug.assignedTo || undefined,
-        assigneeUser: dbBug.assignee
-          ? {
-              id: dbBug.assignee.id,
-              name: dbBug.assignee.name,
-              email: dbBug.assignee.email,
-              avatarUrl: dbBug.assignee.avatarUrl || '',
-              title: dbBug.assignee.headline || 'Developer',
-              skills: [],
-              status: dbBug.assignee.status as any,
-            }
-          : (dbBug.assignedTo ? store.users.get(dbBug.assignedTo) : undefined),
-        createdBy: dbBug.createdBy,
-        creatorUser: dbBug.reporter
-          ? {
-              id: dbBug.reporter.id,
-              name: dbBug.reporter.name,
-              email: dbBug.reporter.email,
-              avatarUrl: dbBug.reporter.avatarUrl || '',
-              title: dbBug.reporter.headline || 'Developer',
-              skills: [],
-              status: dbBug.reporter.status as any,
-            }
-          : store.users.get(dbBug.createdBy),
-        createdAt: dbBug.createdAt.toISOString(),
-        updatedAt: dbBug.updatedAt.toISOString(),
-      };
-    }
-  } catch (err) {}
+      if (dbBug) {
+        updatedBug = {
+          id: dbBug.id,
+          projectId: dbBug.projectId,
+          messageId: dbBug.messageId || undefined,
+          title: dbBug.title,
+          description: dbBug.description || undefined,
+          endpoint: dbBug.endpoint || undefined,
+          priority: dbBug.priority as any,
+          status: dbBug.status as any,
+          assignedTo: dbBug.assignedTo || undefined,
+          assigneeUser: dbBug.assignee
+            ? {
+                id: dbBug.assignee.id,
+                name: dbBug.assignee.name,
+                email: dbBug.assignee.email,
+                avatarUrl: dbBug.assignee.avatarUrl || '',
+                title: dbBug.assignee.headline || 'Developer',
+                skills: [],
+                status: dbBug.assignee.status as any,
+              }
+            : (dbBug.assignedTo ? store.users.get(dbBug.assignedTo) : undefined),
+          createdBy: dbBug.createdBy,
+          creatorUser: dbBug.reporter
+            ? {
+                id: dbBug.reporter.id,
+                name: dbBug.reporter.name,
+                email: dbBug.reporter.email,
+                avatarUrl: dbBug.reporter.avatarUrl || '',
+                title: dbBug.reporter.headline || 'Developer',
+                skills: [],
+                status: dbBug.reporter.status as any,
+              }
+            : store.users.get(dbBug.createdBy),
+          createdAt: dbBug.createdAt.toISOString(),
+          updatedAt: dbBug.updatedAt.toISOString(),
+        };
+      }
+    } catch (err) {}
+  }
 
   if (!updatedBug) {
     if (!existing) return null;
@@ -1413,7 +1627,7 @@ export async function updateBug(id: string, partial: Partial<Bug>): Promise<Bug 
   }
 
   // Sync linked message metadata and in-memory store
-  if (updatedBug.messageId) {
+  if (isDatabaseConfigured && updatedBug.messageId) {
     try {
       const dbMsg = await prisma.message.findUnique({ where: { id: updatedBug.messageId } });
       if (dbMsg) {
@@ -1465,92 +1679,98 @@ export async function updateBug(id: string, partial: Partial<Bug>): Promise<Bug 
     action: 'UPDATED',
   });
 
+  saveStoreToDisk();
+
   return updatedBug;
 }
 
 // ================= ATTACHMENT OPERATIONS =================
 export async function getAttachments(projectId: string): Promise<Attachment[]> {
-  try {
-    const dbAttachments = await prisma.attachment.findMany({
-      where: { projectId },
-      include: {
-        uploader: true,
-      },
-      orderBy: { createdAt: 'desc' },
-    });
-    if (dbAttachments && dbAttachments.length > 0) {
-      return dbAttachments.map((a) => ({
-        id: a.id,
-        messageId: a.messageId || undefined,
-        projectId: a.projectId || undefined,
-        uploaderId: a.uploaderId,
-        userId: a.uploaderId,
-        fileName: a.fileName,
-        fileType: a.fileType,
-        mimeType: a.fileType,
-        fileSize: a.fileSize,
-        storageProvider: a.storageProvider,
-        storageKey: a.storageKey,
-        fileUrl: a.fileUrl || undefined,
-        createdAt: a.createdAt.toISOString(),
-        uploader: a.uploader
-          ? {
-              id: a.uploader.id,
-              name: a.uploader.name,
-              email: a.uploader.email,
-              avatarUrl: a.uploader.avatarUrl || '',
-              title: a.uploader.headline || 'Developer',
-              skills: a.uploader.skills ? JSON.parse(a.uploader.skills) : [],
-              status: a.uploader.status as any,
-            }
-          : undefined,
-      }));
+  if (isDatabaseConfigured) {
+    try {
+      const dbAttachments = await prisma.attachment.findMany({
+        where: { projectId },
+        include: {
+          uploader: true,
+        },
+        orderBy: { createdAt: 'desc' },
+      });
+      if (dbAttachments && dbAttachments.length > 0) {
+        return dbAttachments.map((a) => ({
+          id: a.id,
+          messageId: a.messageId || undefined,
+          projectId: a.projectId || undefined,
+          uploaderId: a.uploaderId,
+          userId: a.uploaderId,
+          fileName: a.fileName,
+          fileType: a.fileType,
+          mimeType: a.fileType,
+          fileSize: a.fileSize,
+          storageProvider: a.storageProvider,
+          storageKey: a.storageKey,
+          fileUrl: a.fileUrl || undefined,
+          createdAt: a.createdAt.toISOString(),
+          uploader: a.uploader
+            ? {
+                id: a.uploader.id,
+                name: a.uploader.name,
+                email: a.uploader.email,
+                avatarUrl: a.uploader.avatarUrl || '',
+                title: a.uploader.headline || 'Developer',
+                skills: a.uploader.skills ? JSON.parse(a.uploader.skills) : [],
+                status: a.uploader.status as any,
+              }
+            : undefined,
+        }));
+      }
+    } catch (err) {
+      // Fallback to in-memory store
     }
-  } catch (err) {
-    // Fallback to in-memory store
   }
   return Array.from(store.attachments.values()).filter((a) => a.projectId === projectId);
 }
 
 export async function getAttachmentById(id: string): Promise<Attachment | null> {
-  try {
-    const att = await prisma.attachment.findUnique({
-      where: { id },
-      include: {
-        uploader: true,
-        project: true,
-        message: true,
-      },
-    });
-    if (att) {
-      return {
-        id: att.id,
-        messageId: att.messageId || undefined,
-        projectId: att.projectId || undefined,
-        uploaderId: att.uploaderId,
-        userId: att.uploaderId,
-        fileName: att.fileName,
-        fileType: att.fileType,
-        mimeType: att.fileType,
-        fileSize: att.fileSize,
-        storageProvider: att.storageProvider,
-        storageKey: att.storageKey,
-        fileUrl: att.fileUrl || undefined,
-        createdAt: att.createdAt.toISOString(),
-        uploader: att.uploader
-          ? {
-              id: att.uploader.id,
-              name: att.uploader.name,
-              email: att.uploader.email,
-              avatarUrl: att.uploader.avatarUrl || '',
-              title: att.uploader.headline || 'Developer',
-              skills: [],
-              status: att.uploader.status as any,
-            }
-          : undefined,
-      };
-    }
-  } catch {}
+  if (isDatabaseConfigured) {
+    try {
+      const att = await prisma.attachment.findUnique({
+        where: { id },
+        include: {
+          uploader: true,
+          project: true,
+          message: true,
+        },
+      });
+      if (att) {
+        return {
+          id: att.id,
+          messageId: att.messageId || undefined,
+          projectId: att.projectId || undefined,
+          uploaderId: att.uploaderId,
+          userId: att.uploaderId,
+          fileName: att.fileName,
+          fileType: att.fileType,
+          mimeType: att.fileType,
+          fileSize: att.fileSize,
+          storageProvider: att.storageProvider,
+          storageKey: att.storageKey,
+          fileUrl: att.fileUrl || undefined,
+          createdAt: att.createdAt.toISOString(),
+          uploader: att.uploader
+            ? {
+                id: att.uploader.id,
+                name: att.uploader.name,
+                email: att.uploader.email,
+                avatarUrl: att.uploader.avatarUrl || '',
+                title: att.uploader.headline || 'Developer',
+                skills: [],
+                status: att.uploader.status as any,
+              }
+            : undefined,
+        };
+      }
+    } catch {}
+  }
   return store.attachments.get(id) || null;
 }
 
@@ -1568,43 +1788,45 @@ export async function createAttachment(data: {
   storageKey: string;
   fileUrl?: string;
 }): Promise<Attachment> {
-  const uploaderId = data.uploaderId || data.userId || 'user_samir';
+  const uploaderId = data.uploaderId || data.userId || 'user_uploader';
   const fileType = data.fileType || data.mimeType || 'application/octet-stream';
   const storageProvider = data.storageProvider || 'backblaze_b2';
 
   let created: Attachment | null = null;
-  try {
-    const dbRecord = await prisma.attachment.create({
-      data: {
-        id: data.id,
-        projectId: data.projectId || null,
-        messageId: data.messageId || null,
-        uploaderId,
-        fileName: data.fileName,
-        fileType,
-        fileSize: data.fileSize,
-        storageProvider,
-        storageKey: data.storageKey,
-        fileUrl: data.fileUrl || null,
-      },
-    });
-    created = {
-      id: dbRecord.id,
-      projectId: dbRecord.projectId || undefined,
-      messageId: dbRecord.messageId || undefined,
-      uploaderId: dbRecord.uploaderId,
-      userId: dbRecord.uploaderId,
-      fileName: dbRecord.fileName,
-      fileType: dbRecord.fileType,
-      mimeType: dbRecord.fileType,
-      fileSize: dbRecord.fileSize,
-      storageProvider: dbRecord.storageProvider,
-      storageKey: dbRecord.storageKey,
-      fileUrl: dbRecord.fileUrl || undefined,
-      createdAt: dbRecord.createdAt.toISOString(),
-    };
-  } catch {
-    // If TiDB create fails, proceed to store fallback
+  if (isDatabaseConfigured) {
+    try {
+      const dbRecord = await prisma.attachment.create({
+        data: {
+          id: data.id,
+          projectId: data.projectId || null,
+          messageId: data.messageId || null,
+          uploaderId,
+          fileName: data.fileName,
+          fileType,
+          fileSize: data.fileSize,
+          storageProvider,
+          storageKey: data.storageKey,
+          fileUrl: data.fileUrl || null,
+        },
+      });
+      created = {
+        id: dbRecord.id,
+        projectId: dbRecord.projectId || undefined,
+        messageId: dbRecord.messageId || undefined,
+        uploaderId: dbRecord.uploaderId,
+        userId: dbRecord.uploaderId,
+        fileName: dbRecord.fileName,
+        fileType: dbRecord.fileType,
+        mimeType: dbRecord.fileType,
+        fileSize: dbRecord.fileSize,
+        storageProvider: dbRecord.storageProvider,
+        storageKey: dbRecord.storageKey,
+        fileUrl: dbRecord.fileUrl || undefined,
+        createdAt: dbRecord.createdAt.toISOString(),
+      };
+    } catch {
+      // If TiDB create fails, proceed to store fallback
+    }
   }
 
   if (!created) {
@@ -1649,37 +1871,39 @@ export async function updateAttachment(
   id: string,
   partial: Partial<Attachment>
 ): Promise<Attachment | null> {
-  try {
-    const updatedDb = await prisma.attachment.update({
-      where: { id },
-      data: {
-        messageId: partial.messageId,
-        projectId: partial.projectId,
-        fileName: partial.fileName,
-        fileType: partial.fileType || partial.mimeType,
-        fileSize: partial.fileSize,
-        storageKey: partial.storageKey,
-        fileUrl: partial.fileUrl,
-      },
-    });
-    const updated: Attachment = {
-      id: updatedDb.id,
-      messageId: updatedDb.messageId || undefined,
-      projectId: updatedDb.projectId || undefined,
-      uploaderId: updatedDb.uploaderId,
-      userId: updatedDb.uploaderId,
-      fileName: updatedDb.fileName,
-      fileType: updatedDb.fileType,
-      mimeType: updatedDb.fileType,
-      fileSize: updatedDb.fileSize,
-      storageProvider: updatedDb.storageProvider,
-      storageKey: updatedDb.storageKey,
-      fileUrl: updatedDb.fileUrl || undefined,
-      createdAt: updatedDb.createdAt.toISOString(),
-    };
-    store.attachments.set(id, updated);
-    return updated;
-  } catch {}
+  if (isDatabaseConfigured) {
+    try {
+      const updatedDb = await prisma.attachment.update({
+        where: { id },
+        data: {
+          messageId: partial.messageId,
+          projectId: partial.projectId,
+          fileName: partial.fileName,
+          fileType: partial.fileType || partial.mimeType,
+          fileSize: partial.fileSize,
+          storageKey: partial.storageKey,
+          fileUrl: partial.fileUrl,
+        },
+      });
+      const updated: Attachment = {
+        id: updatedDb.id,
+        messageId: updatedDb.messageId || undefined,
+        projectId: updatedDb.projectId || undefined,
+        uploaderId: updatedDb.uploaderId,
+        userId: updatedDb.uploaderId,
+        fileName: updatedDb.fileName,
+        fileType: updatedDb.fileType,
+        mimeType: updatedDb.fileType,
+        fileSize: updatedDb.fileSize,
+        storageProvider: updatedDb.storageProvider,
+        storageKey: updatedDb.storageKey,
+        fileUrl: updatedDb.fileUrl || undefined,
+        createdAt: updatedDb.createdAt.toISOString(),
+      };
+      store.attachments.set(id, updated);
+      return updated;
+    } catch {}
+  }
 
   const existing = store.attachments.get(id);
   if (!existing) return null;
@@ -1699,7 +1923,9 @@ export async function getActivity(projectId: string): Promise<ActivityLog[]> {
 
 // ================= CONVERSATIONS (1-TO-1) =================
 export async function getConversations(userId: string): Promise<DirectConversation[]> {
-  const otherUsers = Array.from(store.users.values()).filter((u) => u.id !== userId);
+  const otherUsers = Array.from(store.users.values()).filter(
+    (u) => u.id !== userId && !u.email.endsWith('@test.dev') && !u.email.endsWith('@example.com')
+  );
   return otherUsers.map((other) => {
     // Look up recent message between users
     const conversationId = [userId, other.id].sort().join('_');
@@ -1760,8 +1986,8 @@ export async function getNotificationsFromStore(
   recipientId: string,
   options?: { unreadOnly?: boolean; priority?: string; page?: number; limit?: number }
 ): Promise<{ notifications: AppNotification[]; total: number; unreadCount: number }> {
-  // 1. Try Prisma TiDB if model exists and query succeeds
-  if ((prisma as any)?.notification) {
+  // 1. Try Prisma TiDB if model exists, db configured, and query succeeds
+  if (isDatabaseConfigured && (prisma as any)?.notification) {
     try {
       const where: any = { recipientId };
       if (options?.unreadOnly) where.read = false;
@@ -1847,7 +2073,7 @@ export async function createNotificationInStore(data: {
 
 export async function markNotificationReadInStore(id: string, recipientId: string): Promise<AppNotification | null> {
   // Try Prisma first
-  if ((prisma as any)?.notification) {
+  if (isDatabaseConfigured && (prisma as any)?.notification) {
     try {
       const updated = await (prisma as any).notification.update({
         where: { id },
@@ -1869,7 +2095,7 @@ export async function markNotificationReadInStore(id: string, recipientId: strin
 
 export async function markAllNotificationsReadInStore(recipientId: string): Promise<number> {
   // Try Prisma first
-  if ((prisma as any)?.notification) {
+  if (isDatabaseConfigured && (prisma as any)?.notification) {
     try {
       const res = await (prisma as any).notification.updateMany({
         where: { recipientId, read: false },
@@ -1892,7 +2118,7 @@ export async function markAllNotificationsReadInStore(recipientId: string): Prom
 }
 
 export async function getNotificationPreferencesFromStore(userId: string): Promise<NotificationPreferences> {
-  if ((prisma as any)?.notificationPreference) {
+  if (isDatabaseConfigured && (prisma as any)?.notificationPreference) {
     try {
       const prefs = await (prisma as any).notificationPreference.findUnique({ where: { userId } });
       if (prefs) return prefs as NotificationPreferences;
@@ -1919,7 +2145,7 @@ export async function updateNotificationPreferencesInStore(
   userId: string,
   partial: Partial<NotificationPreferences>
 ): Promise<NotificationPreferences> {
-  if ((prisma as any)?.notificationPreference) {
+  if (isDatabaseConfigured && (prisma as any)?.notificationPreference) {
     try {
       const updated = await (prisma as any).notificationPreference.upsert({
         where: { userId },

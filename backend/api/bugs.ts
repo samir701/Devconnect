@@ -20,6 +20,10 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       return res.status(400).json({ error: 'Title and projectId are required' });
     }
 
+    const creatorId = (body.createdBy as string) || (req.headers['x-user-id'] as string);
+    if (!creatorId) return res.status(401).json({ error: 'Authentication required' });
+    const assigneeId = (body.assignedTo as string) || creatorId;
+
     const bug = await createBug({
       projectId: body.projectId,
       messageId: body.messageId,
@@ -28,8 +32,8 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       endpoint: body.endpoint || '',
       priority: body.priority || 'HIGH',
       status: body.status || 'OPEN',
-      assignedTo: body.assignedTo || 'user_samir',
-      createdBy: body.createdBy || 'user_samir',
+      assignedTo: assigneeId,
+      createdBy: creatorId,
     });
 
     return res.status(201).json({ bug });

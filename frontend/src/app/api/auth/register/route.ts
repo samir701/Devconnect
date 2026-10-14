@@ -22,12 +22,25 @@ export async function POST(request: Request) {
 
     const { user, token } = await registerUser({ name, email, password, title, skills });
 
-    return NextResponse.json({
+    const res = NextResponse.json({
       success: true,
       user,
       token,
-      message: 'Account created successfully! Verification email generated.',
+      message: 'Account created successfully!',
     }, { status: 201 });
+
+    res.cookies.set('devconnect_token', token, {
+      path: '/',
+      maxAge: 7 * 86400,
+      sameSite: 'lax',
+    });
+    res.cookies.set('devconnect_user_id', user.id, {
+      path: '/',
+      maxAge: 7 * 86400,
+      sameSite: 'lax',
+    });
+
+    return res;
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : 'Registration failed';
     return NextResponse.json({ error: msg }, { status: 400 });

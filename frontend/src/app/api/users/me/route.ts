@@ -42,7 +42,7 @@ export async function PATCH(request: Request) {
     const userId = getSessionUserId(request);
     const body = await request.json();
 
-    const allowedUpdates = ['bio', 'headline', 'skills', 'status', 'githubUrl', 'linkedinUrl', 'avatarUrl', 'name'];
+    const allowedUpdates = ['bio', 'headline', 'skills', 'status', 'githubUrl', 'linkedinUrl', 'avatarUrl', 'name', 'email'];
     const updateData: Record<string, unknown> = {};
 
     for (const key of allowedUpdates) {

@@ -6,7 +6,7 @@ import {
   getMessages,
 } from './db.service';
 
-export async function askProjectAi(projectId: string, prompt: string, userId: string = 'user_samir') {
+export async function askProjectAi(projectId: string, prompt: string, userId?: string) {
   const project = await getProjectById(projectId);
   if (!project) {
     throw new Error('Project not found');

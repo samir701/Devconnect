@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server';
 import { getAttachments, createAttachment } from '@/lib/db';
 import { getStorageStatus } from '@/lib/storage';
+import { getSessionUserId } from '@/lib/auth-guard';
 
 export async function GET(request: Request) {
   const { searchParams } = new URL(request.url);
@@ -21,10 +22,16 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: 'fileName and projectId are required' }, { status: 400 });
     }
 
+    const sessionUserId = getSessionUserId(request);
+    const userId = body.userId || sessionUserId;
+    if (!userId) {
+      return NextResponse.json({ error: 'Authentication required' }, { status: 401 });
+    }
+
     const attachment = await createAttachment({
       projectId: body.projectId,
       messageId: body.messageId,
-      userId: body.userId || 'user_samir',
+      userId,
       fileName: body.fileName,
       mimeType: body.mimeType || 'application/octet-stream',
       fileSize: body.fileSize || 0,

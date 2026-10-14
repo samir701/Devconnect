@@ -62,7 +62,8 @@ export function setupWebSocketServer(httpServer: HttpServer, prisma: PrismaClien
 
   io.on('connection', (socket: Socket<ClientToServerEvents, ServerToClientEvents, Record<string, never>, SocketData>) => {
     const rawUserId = socket.handshake.query.userId as string | undefined;
-    const userId = rawUserId || 'user_samir';
+    if (!rawUserId) return;
+    const userId = rawUserId;
     socket.data.userId = userId;
 
     // Track active connection

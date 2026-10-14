@@ -29,10 +29,13 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       return res.status(400).json({ error: 'fileName and projectId are required' });
     }
 
+    const fileUserId = (body.userId as string) || (req.headers['x-user-id'] as string);
+    if (!fileUserId) return res.status(401).json({ error: 'Authentication required' });
+
     const attachment = await createAttachment({
       projectId: body.projectId,
       messageId: body.messageId,
-      userId: body.userId || 'user_samir',
+      userId: fileUserId,
       fileName: body.fileName,
       mimeType: body.mimeType || 'application/octet-stream',
       fileSize: body.fileSize || 0,

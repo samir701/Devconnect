@@ -138,7 +138,7 @@ export function MessageItem({ message, onReplySelect, isConsecutive = false }: M
         />
       ) : (
         <div className="w-10 flex items-center justify-center shrink-0">
-          <span className="text-[9px] text-slate-600 opacity-0 group-hover:opacity-100 transition-opacity select-none font-mono">
+          <span className="text-[9px] text-slate-600 opacity-0 group-hover:opacity-100 transition-opacity select-none font-mono" suppressHydrationWarning>
             {formatTimestamp(message.createdAt)}
           </span>
         </div>
@@ -178,7 +178,7 @@ export function MessageItem({ message, onReplySelect, isConsecutive = false }: M
               </span>
             )}
 
-            <span className="text-[10px] text-slate-500 font-mono">
+            <span className="text-[10px] text-slate-500 font-mono" suppressHydrationWarning>
               {formatTimestamp(message.createdAt)}
             </span>
 

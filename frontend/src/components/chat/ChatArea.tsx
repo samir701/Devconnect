@@ -16,9 +16,13 @@ import {
   CheckCircle,
   Sparkles,
   Radio,
+  Phone,
+  Video,
+  PhoneCall,
 } from 'lucide-react';
 import { GithubIcon } from '@/components/ui/Icons';
 import { NotificationBell } from '@/components/ui/NotificationBell';
+import { useCallStore } from '@/lib/callContext';
 
 export function ChatArea() {
   const {
@@ -29,6 +33,8 @@ export function ChatArea() {
     members,
     typingUsers,
     isSocketConnected,
+    isAutoSyncActive,
+    lastSyncedAt,
     isRightPanelOpen,
     setIsRightPanelOpen,
     setIsMobileSidebarOpen,
@@ -36,6 +42,13 @@ export function ChatArea() {
     setIsSearchOpen,
     setIsStatusOpen,
   } = useAppStore();
+
+  const {
+    startDirectCall,
+    joinGroupCall,
+    activeGroupCalls,
+    callStatus,
+  } = useCallStore();
 
   const [searchFilter, setSearchFilter] = useState('');
   const [replyingTo, setReplyingTo] = useState<Message | null>(null);
@@ -55,16 +68,30 @@ export function ChatArea() {
     );
   });
 
-  // Helper: Format date for date dividers
+  // Helper: Format date for date dividers deterministically
   const formatDateDivider = (dateStr: string) => {
     try {
       const d = new Date(dateStr);
-      const today = new Date();
-      if (d.toDateString() === today.toDateString()) return 'Today';
-      const yesterday = new Date();
-      yesterday.setDate(today.getDate() - 1);
-      if (d.toDateString() === yesterday.toDateString()) return 'Yesterday';
-      return d.toLocaleDateString(undefined, { weekday: 'short', month: 'short', day: 'numeric' });
+      const now = new Date();
+      if (
+        d.getFullYear() === now.getFullYear() &&
+        d.getMonth() === now.getMonth() &&
+        d.getDate() === now.getDate()
+      ) {
+        return 'Today';
+      }
+      const yesterday = new Date(now);
+      yesterday.setDate(now.getDate() - 1);
+      if (
+        d.getFullYear() === yesterday.getFullYear() &&
+        d.getMonth() === yesterday.getMonth() &&
+        d.getDate() === yesterday.getDate()
+      ) {
+        return 'Yesterday';
+      }
+      const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+      const days = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+      return `${days[d.getDay()]}, ${months[d.getMonth()]} ${d.getDate()}`;
     } catch {
       return dateStr;
     }
@@ -73,12 +100,13 @@ export function ChatArea() {
   return (
     <div className="flex-1 flex flex-col h-full bg-[#090d16] overflow-hidden">
       {/* Top Conversation Header */}
-      <div className="h-14 border-b border-white/10 px-4 flex items-center justify-between bg-[#0b0f19]/80 backdrop-blur-md shrink-0">
-        <div className="flex items-center gap-3 min-w-0">
+      <div className="relative z-40 h-14 border-b border-white/10 px-4 flex items-center justify-between bg-[#0b0f19] shrink-0 shadow-sm">
+        {/* Left Side: Channel / Project breadcrumb */}
+        <div className="flex items-center gap-2.5 min-w-0">
           {/* Mobile hamburger menu */}
           <button
             onClick={() => setIsMobileSidebarOpen(true)}
-            className="md:hidden p-1.5 text-slate-400 hover:text-white rounded-lg hover:bg-white/5"
+            className="md:hidden p-1.5 text-slate-400 hover:text-white rounded-lg hover:bg-white/5 shrink-0"
             aria-label="Open sidebar"
           >
             <Menu className="w-5 h-5" />
@@ -94,11 +122,11 @@ export function ChatArea() {
                 size="sm"
               />
               <div className="min-w-0">
-                <div className="flex items-center gap-1.5">
+                <div className="flex items-center gap-2">
                   <span className="font-semibold text-sm text-white truncate">
                     {activeConversation.otherUser?.name}
                   </span>
-                  <span className="inline-flex items-center gap-1 text-[10px] font-mono px-1.5 py-0.2 rounded bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">
+                  <span className="inline-flex items-center gap-1 text-[10px] font-mono px-1.5 py-0.5 rounded-full bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">
                     <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
                     Direct
                   </span>
@@ -111,17 +139,19 @@ export function ChatArea() {
           ) : (
             /* Project Channel Header */
             <div className="flex items-center gap-2 min-w-0">
-              <div className="w-7 h-7 rounded-lg bg-indigo-600/20 border border-indigo-500/30 flex items-center justify-center text-indigo-400 shrink-0">
+              <div className="w-7 h-7 rounded-lg bg-indigo-500/10 border border-indigo-500/20 flex items-center justify-center text-indigo-400 shrink-0">
                 <Hash className="w-4 h-4" />
               </div>
-              <span className="font-semibold text-sm text-white truncate">
+
+              {/* Channel Name - never truncated unnecessarily */}
+              <span className="font-semibold text-sm text-white shrink-0 tracking-tight">
                 {activeChannel}
               </span>
 
               {activeProject && (
-                <>
-                  <span className="text-slate-600">•</span>
-                  <span className="text-xs text-slate-400 truncate hidden sm:inline">
+                <div className="hidden sm:flex items-center gap-2 min-w-0">
+                  <span className="text-slate-600 select-none text-xs">/</span>
+                  <span className="text-xs font-medium text-slate-400 truncate max-w-[160px] xl:max-w-none">
                     {activeProject.name}
                   </span>
 
@@ -130,44 +160,138 @@ export function ChatArea() {
                       href={`https://github.com/${activeProject.githubRepo}`}
                       target="_blank"
                       rel="noopener noreferrer"
-                      className="hidden md:flex items-center gap-1 text-[11px] font-mono text-slate-400 hover:text-white bg-white/5 hover:bg-white/10 px-2 py-0.5 rounded border border-white/10 transition-colors"
-                      title="GitHub Repository"
+                      className="hidden md:inline-flex items-center gap-1.5 text-[11px] font-mono text-slate-400 hover:text-white bg-white/[0.04] hover:bg-white/[0.08] px-2 py-0.5 rounded-md border border-white/10 transition-colors shrink-0"
+                      title={`GitHub: ${activeProject.githubRepo}`}
                     >
                       <GithubIcon className="w-3 h-3 text-slate-300" />
-                      <span>{activeProject.githubRepo}</span>
+                      <span className="truncate max-w-[120px]">
+                        {activeProject.githubRepo.split('/')[1] || activeProject.githubRepo}
+                      </span>
                     </a>
                   )}
-                </>
+                </div>
               )}
             </div>
           )}
         </div>
 
-        {/* Right Header Utilities */}
-        <div className="flex items-center gap-2">
-          {/* Live Socket Status Pill */}
+        {/* Right Header Utilities - clean, balanced, uncluttered */}
+        <div className="flex items-center gap-1.5 sm:gap-2 shrink-0">
+          {/* Live Sync Status Dot Badge */}
           <div
-            className={`hidden sm:inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full border text-[10px] font-mono font-medium transition-colors ${
-              isSocketConnected
-                ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/20'
-                : 'bg-amber-500/10 text-amber-400 border-amber-500/20'
+            className={`hidden sm:inline-flex items-center gap-1.5 px-2 py-1 rounded-lg text-[10px] font-mono font-medium transition-colors ${
+              isSocketConnected || isAutoSyncActive
+                ? 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/20'
+                : 'bg-amber-500/10 text-amber-400 border border-amber-500/20'
             }`}
+            title={`Realtime Event Sync Active (Updates on trigger: new messages, member add/remove, group add/remove)${lastSyncedAt ? ` • Last synced at ${lastSyncedAt.toLocaleTimeString()}` : ''}`}
           >
-            <Radio className={`w-2.5 h-2.5 ${isSocketConnected ? 'text-emerald-400 animate-pulse' : 'text-amber-400'}`} />
-            <span>{isSocketConnected ? 'Realtime Connected' : 'Connecting...'}</span>
+            <span className="relative flex h-2 w-2">
+              <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75" />
+              <span className="relative inline-flex rounded-full h-2 w-2 bg-emerald-400" />
+            </span>
+            <span className="hidden xl:inline tracking-tight font-sans">
+              Realtime Sync
+            </span>
           </div>
 
-          {/* Filter in chat */}
+          {/* Filter messages input */}
           <div className="relative hidden lg:block">
-            <Search className="w-3.5 h-3.5 absolute left-2.5 top-1/2 -translate-y-1/2 text-slate-500" />
+            <Search className="w-3.5 h-3.5 absolute left-2.5 top-1/2 -translate-y-1/2 text-slate-500 pointer-events-none" />
             <input
               type="text"
-              placeholder="Filter messages..."
+              placeholder="Search chat..."
               value={searchFilter}
               onChange={(e) => setSearchFilter(e.target.value)}
-              className="pl-8 pr-3 py-1 text-xs bg-white/5 border border-white/10 rounded-lg text-slate-200 placeholder-slate-500 outline-none w-36 focus:w-48 transition-all"
+              className="pl-8 pr-2.5 py-1 text-xs bg-white/[0.03] hover:bg-white/[0.06] focus:bg-white/[0.08] border border-white/10 focus:border-indigo-500/40 rounded-lg text-slate-200 placeholder-slate-500 outline-none w-28 focus:w-44 transition-all"
             />
           </div>
+
+          {/* Realtime Video & Voice Call Controls */}
+          {activeConversation ? (
+            /* Direct 1-on-1 Call Buttons */
+            <div className="flex items-center gap-1">
+              <button
+                onClick={() => startDirectCall(activeConversation.otherUser, false)}
+                disabled={callStatus !== 'IDLE'}
+                className="p-1.5 rounded-lg text-slate-300 hover:text-emerald-400 bg-white/[0.03] hover:bg-emerald-500/10 border border-white/10 hover:border-emerald-500/30 transition-all cursor-pointer disabled:opacity-50"
+                title={`Start Voice Call with ${activeConversation.otherUser?.name || 'Developer'}`}
+              >
+                <Phone className="w-3.5 h-3.5" />
+              </button>
+              <button
+                onClick={() => startDirectCall(activeConversation.otherUser, true)}
+                disabled={callStatus !== 'IDLE'}
+                className="p-1.5 rounded-lg text-slate-300 hover:text-cyan-400 bg-white/[0.03] hover:bg-cyan-500/10 border border-white/10 hover:border-cyan-500/30 transition-all cursor-pointer disabled:opacity-50"
+                title={`Start Video Call with ${activeConversation.otherUser?.name || 'Developer'}`}
+              >
+                <Video className="w-3.5 h-3.5" />
+              </button>
+            </div>
+          ) : activeProject ? (
+            /* Group / Channel Call Buttons */
+            (() => {
+              const currentGroupRoomId = `group_${activeProject.id}_${activeChannel || 'general'}`;
+              const ongoingCall = activeGroupCalls[currentGroupRoomId];
+              const hasActiveCall = ongoingCall && ongoingCall.participantCount > 0;
+
+              return (
+                <div className="flex items-center gap-1">
+                  {hasActiveCall ? (
+                    <button
+                      onClick={() =>
+                        joinGroupCall(
+                          activeProject.id,
+                          activeChannel || 'general',
+                          true,
+                          `${activeProject.name} #${activeChannel || 'general'}`
+                        )
+                      }
+                      className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs font-semibold bg-emerald-500 hover:bg-emerald-400 text-slate-950 shadow-md shadow-emerald-500/20 transition-all cursor-pointer animate-pulse"
+                      title="Join ongoing group call"
+                    >
+                      <PhoneCall className="w-3.5 h-3.5 text-slate-950" />
+                      <span>Join Call ({ongoingCall.participantCount})</span>
+                    </button>
+                  ) : (
+                    <>
+                      <button
+                        onClick={() =>
+                          joinGroupCall(
+                            activeProject.id,
+                            activeChannel || 'general',
+                            false,
+                            `${activeProject.name} #${activeChannel || 'general'}`
+                          )
+                        }
+                        disabled={callStatus !== 'IDLE'}
+                        className="p-1.5 rounded-lg text-slate-300 hover:text-emerald-400 bg-white/[0.03] hover:bg-emerald-500/10 border border-white/10 hover:border-emerald-500/30 transition-all cursor-pointer disabled:opacity-50"
+                        title={`Start Voice Room in #${activeChannel || 'general'}`}
+                      >
+                        <Phone className="w-3.5 h-3.5" />
+                      </button>
+                      <button
+                        onClick={() =>
+                          joinGroupCall(
+                            activeProject.id,
+                            activeChannel || 'general',
+                            true,
+                            `${activeProject.name} #${activeChannel || 'general'}`
+                          )
+                        }
+                        disabled={callStatus !== 'IDLE'}
+                        className="flex items-center gap-1 px-2 py-1 rounded-lg text-xs font-medium text-slate-300 hover:text-cyan-300 bg-white/[0.03] hover:bg-cyan-500/10 border border-white/10 hover:border-cyan-500/30 transition-all cursor-pointer disabled:opacity-50"
+                        title={`Start Video Call in #${activeChannel || 'general'}`}
+                      >
+                        <Video className="w-3.5 h-3.5 text-cyan-400" />
+                        <span className="hidden md:inline text-[11px]">Call</span>
+                      </button>
+                    </>
+                  )}
+                </div>
+              );
+            })()
+          ) : null}
 
           {/* Members count */}
           {!activeConversation && (
@@ -176,25 +300,29 @@ export function ChatArea() {
                 setActiveRightTab('info');
                 setIsRightPanelOpen(true);
               }}
-              className="hidden sm:flex items-center gap-1.5 px-2.5 py-1 text-xs text-slate-400 hover:text-white bg-white/5 hover:bg-white/10 rounded-lg border border-white/10 transition-colors cursor-pointer"
+              className="hidden sm:flex items-center gap-1.5 px-2.5 py-1 text-xs text-slate-400 hover:text-white bg-white/[0.03] hover:bg-white/10 rounded-lg border border-white/10 transition-colors cursor-pointer"
+              title="View Project Members"
             >
-              <Users className="w-3.5 h-3.5" />
-              <span>{members.length} members</span>
+              <Users className="w-3.5 h-3.5 text-slate-400" />
+              <span className="text-[11px] font-mono">{members.length}</span>
             </button>
           )}
 
-          {/* AI Shortcut */}
+          {/* AI Project Assistant Shortcut */}
           <button
             onClick={() => {
               setActiveRightTab('ai');
               setIsRightPanelOpen(true);
             }}
-            className="flex items-center gap-1.5 px-2.5 py-1 text-xs text-purple-300 hover:text-white bg-purple-600/15 hover:bg-purple-600/25 border border-purple-500/30 rounded-lg transition-all cursor-pointer"
-            title="AI Project Assistant"
+            className="flex items-center gap-1.5 px-2.5 py-1 text-xs font-medium text-purple-300 hover:text-purple-200 bg-purple-500/10 hover:bg-purple-500/20 border border-purple-500/30 rounded-lg transition-all cursor-pointer shadow-sm shadow-purple-500/10"
+            title="Open AI Project Assistant"
           >
             <Sparkles className="w-3.5 h-3.5 text-purple-400" />
             <span className="hidden sm:inline">Ask AI</span>
           </button>
+
+          {/* Subtle Vertical Divider */}
+          <div className="h-4 w-[1px] bg-white/10 mx-0.5 hidden sm:block" />
 
           {/* Phase 6 Notification Bell */}
           <NotificationBell />
@@ -205,9 +333,9 @@ export function ChatArea() {
             className={`p-1.5 rounded-lg border transition-colors cursor-pointer ${
               isRightPanelOpen
                 ? 'bg-indigo-600/20 text-indigo-300 border-indigo-500/30'
-                : 'text-slate-400 hover:text-white bg-white/5 border-white/10'
+                : 'text-slate-400 hover:text-white bg-white/[0.03] hover:bg-white/10 border-white/10'
             }`}
-            title="Toggle Project Information Panel"
+            title={isRightPanelOpen ? 'Collapse Project Panel' : 'Expand Project Panel'}
           >
             <PanelRight className="w-4 h-4" />
           </button>
@@ -253,9 +381,12 @@ export function ChatArea() {
           return (
             <React.Fragment key={msg.id}>
               {showDateDivider && (
-                <div className="flex items-center my-4 px-4">
+                <div className="flex items-center my-4 px-4" suppressHydrationWarning>
                   <div className="flex-1 h-px bg-white/10" />
-                  <span className="px-3 py-1 rounded-full bg-white/5 border border-white/10 text-[10px] font-semibold uppercase tracking-wider text-slate-400">
+                  <span
+                    className="px-3 py-1 rounded-full bg-white/5 border border-white/10 text-[10px] font-semibold uppercase tracking-wider text-slate-400"
+                    suppressHydrationWarning
+                  >
                     {formatDateDivider(msg.createdAt)}
                   </span>
                   <div className="flex-1 h-px bg-white/10" />

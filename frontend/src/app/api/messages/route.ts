@@ -11,6 +11,7 @@ import { detectSecrets } from '@/lib/secretDetector';
 import { prisma } from '@/lib/prisma';
 import { createNotification, getUserNotificationPreferences } from '@/lib/notifications';
 import { sendMentionEmail } from '@/lib/email/notifications';
+import { getSessionUserId } from '@/lib/auth-guard';
 
 
 export async function GET(request: Request) {
@@ -31,6 +32,12 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: 'Message content is required' }, { status: 400 });
     }
 
+    const sessionUserId = getSessionUserId(request);
+    const senderId = body.senderId || sessionUserId;
+    if (!senderId) {
+      return NextResponse.json({ error: 'Authentication required to post messages' }, { status: 401 });
+    }
+
     // Secret check warning indicator
     const secretCheck = detectSecrets(body.content || '');
 
@@ -49,7 +56,7 @@ export async function POST(request: Request) {
           priority: bugData.priority || 'HIGH',
           status: bugData.status || 'OPEN',
           assignedTo: bugData.assignedTo,
-          createdBy: body.senderId || 'user_samir',
+          createdBy: senderId,
         });
       }
     }
@@ -64,7 +71,7 @@ export async function POST(request: Request) {
           priority: taskData.priority || 'MEDIUM',
           status: taskData.status || 'TODO',
           assignedTo: taskData.assignedTo,
-          createdBy: body.senderId || 'user_samir',
+          createdBy: senderId,
           dueDate: taskData.dueDate || 'Today',
         });
       }
@@ -75,8 +82,8 @@ export async function POST(request: Request) {
     const message = await createMessage({
       projectId: body.projectId,
       conversationId: body.conversationId,
-      channel: body.channel || 'general',
-      senderId: body.senderId || 'user_samir',
+      channel: body.channel || (body.conversationId ? 'direct' : 'general'),
+      senderId,
       messageType: body.messageType || 'TEXT',
       content: body.content,
       codeLanguage: body.codeLanguage,
@@ -100,7 +107,7 @@ export async function POST(request: Request) {
         await createAttachment({
           projectId: body.projectId,
           messageId: message.id,
-          uploaderId: body.senderId || 'user_samir',
+          uploaderId: senderId,
           fileName: attachmentData.fileName,
           fileType: attachmentData.fileType || attachmentData.mimeType || 'application/octet-stream',
           mimeType: attachmentData.mimeType || attachmentData.fileType || 'application/octet-stream',

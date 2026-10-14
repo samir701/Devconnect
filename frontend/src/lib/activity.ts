@@ -3,6 +3,15 @@ import { ActivityLog, ActionType, User } from './types';
 
 const SOCKET_SERVER_URL = process.env.NEXT_PUBLIC_SOCKET_URL || 'http://localhost:3001';
 
+const DATABASE_URL = process.env.DATABASE_URL || process.env.TIDB_DATABASE_URL;
+const isDatabaseConfigured = Boolean(
+  DATABASE_URL &&
+  !DATABASE_URL.includes('<USERNAME>') &&
+  !DATABASE_URL.includes('<PASSWORD>') &&
+  !DATABASE_URL.includes('username:password') &&
+  !DATABASE_URL.includes('YourPassword')
+);
+
 export interface LogActivityParams {
   projectId: string;
   userId: string;
@@ -120,51 +129,55 @@ export async function logActivity(params: LogActivityParams): Promise<ActivityLo
     actorUser = globalThis.__devconnect_store?.users.get(userId) || null;
   } catch {}
 
-  let createdLog: ActivityLog;
+  let createdLog: ActivityLog | null = null;
 
-  try {
-    const dbRecord = await prisma.activityLog.create({
-      data: {
-        projectId,
-        userId,
-        actionType,
-        entityId: entityId || null,
-        entityType: entityType || null,
-        metadata: metaString,
-      },
-      include: {
-        user: true,
-      },
-    });
+  if (isDatabaseConfigured) {
+    try {
+      const dbRecord = await prisma.activityLog.create({
+        data: {
+          projectId,
+          userId,
+          actionType,
+          entityId: entityId || null,
+          entityType: entityType || null,
+          metadata: metaString,
+        },
+        include: {
+          user: true,
+        },
+      });
 
-    createdLog = {
-      id: dbRecord.id,
-      projectId: dbRecord.projectId,
-      userId: dbRecord.userId,
-      actionType: dbRecord.actionType,
-      entityId: dbRecord.entityId || undefined,
-      entityType: dbRecord.entityType || undefined,
-      metadata: dbRecord.metadata || undefined,
-      createdAt: dbRecord.createdAt.toISOString(),
-      user: dbRecord.user
-        ? {
-            id: dbRecord.user.id,
-            name: dbRecord.user.name,
-            email: dbRecord.user.email,
-            avatarUrl: dbRecord.user.avatarUrl || '',
-            title: dbRecord.user.headline || 'Developer',
-            skills: [],
-            status: dbRecord.user.status as any,
-          }
-        : actorUser || undefined,
-      userName: dbRecord.user?.name || actorUser?.name || 'Developer',
-      userAvatar: dbRecord.user?.avatarUrl || actorUser?.avatarUrl || '',
-      title: summary.title,
-      details: summary.details,
-      timestamp: 'Just now',
-      eventType: actionType,
-    };
-  } catch (err) {
+      createdLog = {
+        id: dbRecord.id,
+        projectId: dbRecord.projectId,
+        userId: dbRecord.userId,
+        actionType: dbRecord.actionType,
+        entityId: dbRecord.entityId || undefined,
+        entityType: dbRecord.entityType || undefined,
+        metadata: dbRecord.metadata || undefined,
+        createdAt: dbRecord.createdAt.toISOString(),
+        user: dbRecord.user
+          ? {
+              id: dbRecord.user.id,
+              name: dbRecord.user.name,
+              email: dbRecord.user.email,
+              avatarUrl: dbRecord.user.avatarUrl || '',
+              title: dbRecord.user.headline || 'Developer',
+              skills: [],
+              status: dbRecord.user.status as any,
+            }
+          : actorUser || undefined,
+        userName: dbRecord.user?.name || actorUser?.name || 'Developer',
+        userAvatar: dbRecord.user?.avatarUrl || actorUser?.avatarUrl || '',
+        title: summary.title,
+        details: summary.details,
+        timestamp: 'Just now',
+        eventType: actionType,
+      };
+    } catch (err) {}
+  }
+
+  if (!createdLog) {
     // In-memory fallback
     const id = `act_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`;
     createdLog = {
@@ -211,24 +224,25 @@ export async function getActivityFeed(
   const limit = options?.limit ?? 50;
   const offset = options?.offset ?? 0;
 
-  try {
-    const whereClause: any = { projectId };
-    if (options?.actionType) {
-      whereClause.actionType = options.actionType;
-    }
+  if (isDatabaseConfigured) {
+    try {
+      const whereClause: any = { projectId };
+      if (options?.actionType) {
+        whereClause.actionType = options.actionType;
+      }
 
-    const [dbLogs, total] = await Promise.all([
-      prisma.activityLog.findMany({
-        where: whereClause,
-        include: {
-          user: true,
-        },
-        orderBy: { createdAt: 'desc' },
-        take: limit,
-        skip: offset,
-      }),
-      prisma.activityLog.count({ where: whereClause }),
-    ]);
+      const [dbLogs, total] = await Promise.all([
+        prisma.activityLog.findMany({
+          where: whereClause,
+          include: {
+            user: true,
+          },
+          orderBy: { createdAt: 'desc' },
+          take: limit,
+          skip: offset,
+        }),
+        prisma.activityLog.count({ where: whereClause }),
+      ]);
 
     if (dbLogs && dbLogs.length > 0) {
       const activities: ActivityLog[] = dbLogs.map((log) => {
@@ -271,10 +285,11 @@ export async function getActivityFeed(
         };
       });
 
-      return { activities, total };
+        return { activities, total };
+      }
+    } catch (err) {
+      // Fallback to in-memory store
     }
-  } catch (err) {
-    // Fallback to in-memory store
   }
 
   const inMem = globalThis.__devconnect_store?.activity.filter((a) => a.projectId === projectId) || [];

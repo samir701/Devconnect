@@ -7,9 +7,13 @@ import {
   getMessages,
 } from '@/lib/db';
 
+import { getSessionUserId } from '@/lib/auth-guard';
+
 export async function POST(request: Request) {
   try {
-    const { projectId, prompt, userId = 'user_samir' } = await request.json();
+    const sessionUserId = getSessionUserId(request);
+    const body = await request.json();
+    const { projectId, prompt, userId = sessionUserId } = body;
 
     if (!projectId || !prompt) {
       return NextResponse.json({ error: 'projectId and prompt are required' }, { status: 400 });
@@ -47,14 +51,14 @@ export async function POST(request: Request) {
         (openBugs.length > 0 ? `⚠️ **Open Blockers**: ${openBugs.map((b) => `${b.title} (${b.priority} priority)`).join(', ')}\n` : `✓ **Zero blocking bugs currently open**\n`) +
         `\n**Recent Activity Timeline:**\n` +
         activities.slice(0, 3).map((a) => `• *${a.timestamp}*: ${a.title}`).join('\n') +
-        `\n\n*Generated with project-isolated context from TiDB state.*`;
+        `\n\n*Generated with project-isolated context from DevConnect state.*`;
 
     } else if (lowerPrompt.includes('auth') || lowerPrompt.includes('authentication')) {
-      responseText = `### 🔐 Authentication Activity & Status\n\n` +
-        `• **JWT Validation**: Refresh-token handling was fixed in PR #42 by Debmalya Roy.\n` +
-        `• **Login API**: Endpoint \`/api/auth/login\` investigated by Arun Kumar; PR #42 merged into \`main\`.\n` +
-        `• **Open Issues**: Check bug status — Bug #201 marked as FIXED after verifying bearer header parsing.\n` +
-        `• **Active Tasks**: Task *Fix authentication API and session expiry* is currently IN_PROGRESS (Assigned to Samir Brahma).\n` +
+      const authTasks = tasks.filter((t) => t.title.toLowerCase().includes('auth') || (t.description && t.description.toLowerCase().includes('auth')));
+      const authBugs = bugs.filter((b) => b.title.toLowerCase().includes('auth') || (b.description && b.description.toLowerCase().includes('auth')));
+      responseText = `### 🔐 Authentication Status & Activity\n\n` +
+        `• **Active Auth Tasks**: ${authTasks.length} task(s) (${authTasks.map((t) => t.title).join(', ') || 'None'})\n` +
+        `• **Auth Bugs**: ${authBugs.length} bug(s) (${authBugs.map((b) => b.title).join(', ') || 'None'})\n` +
         `\n*All authentication discussions are tracked in #${project.channels[0]} channel.*`;
 
     } else if (lowerPrompt.includes('bug') || lowerPrompt.includes('issue')) {

@@ -86,11 +86,6 @@ export async function GET(
       }
     }
 
-    // Fallback: If in dev mode with default user
-    if (!isAuthorized && userId === 'user_samir') {
-      isAuthorized = true;
-    }
-
     if (!isAuthorized) {
       return NextResponse.json(
         { error: 'Forbidden: You do not have access to download this file' },

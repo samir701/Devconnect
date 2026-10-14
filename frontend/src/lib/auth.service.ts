@@ -1,6 +1,6 @@
 import bcrypt from 'bcryptjs';
 import { User } from './types';
-import { getUserById, updateUser, getUsers } from './db';
+import { getUserById, updateUser, getUsers, saveStoreToDisk } from './db';
 
 // In-memory verification & reset tokens for serverless session lifecycle
 declare global {
@@ -51,9 +51,10 @@ export async function registerUser(params: {
     id,
     name: params.name,
     email: params.email,
-    avatarUrl: `https://images.unsplash.com/photo-1535713875002-d1d0cf377fde?w=150&auto=format&fit=crop&q=80`,
+    passwordHash,
+    avatarUrl: `https://api.dicebear.com/7.x/avataaars/svg?seed=${encodeURIComponent(params.name)}`,
     title: params.title || 'Software Developer',
-    skills: params.skills || ['JavaScript', 'TypeScript', 'Node.js'],
+    skills: params.skills && params.skills.length > 0 ? params.skills : ['JavaScript', 'TypeScript', 'Node.js'],
     status: 'ONLINE',
     lastSeen: 'Just now',
     currentProjectId: 'proj_ai_employee',
@@ -62,6 +63,25 @@ export async function registerUser(params: {
   // Add to store
   if (globalThis.__devconnect_store) {
     globalThis.__devconnect_store.users.set(id, newUser);
+
+    // Auto-assign user to initial workspace projects as DEVELOPER
+    const defaultProjects = ['proj_ai_employee', 'proj_client_portal'];
+    for (const pid of defaultProjects) {
+      const alreadyMember = globalThis.__devconnect_store.members.some(
+        (m) => m.projectId === pid && m.userId === id
+      );
+      if (!alreadyMember) {
+        globalThis.__devconnect_store.members.push({
+          id: `mem_${Date.now()}_${pid}_${id}`,
+          projectId: pid,
+          userId: id,
+          role: 'DEVELOPER',
+          joinedAt: new Date().toISOString(),
+          user: newUser,
+        });
+      }
+    }
+    saveStoreToDisk();
   }
 
   const token = `devconn_token_${Date.now()}_${id}`;
@@ -71,7 +91,8 @@ export async function registerUser(params: {
     expires: Date.now() + 7 * 86400 * 1000,
   });
 
-  return { user: newUser, token };
+  const { passwordHash: _, ...safeUser } = newUser;
+  return { user: safeUser as User, token };
 }
 
 export async function loginUser(email: string, password?: string): Promise<{ user: User; token: string }> {
@@ -81,7 +102,23 @@ export async function loginUser(email: string, password?: string): Promise<{ use
     throw new Error('No user account found with that email address.');
   }
 
-  // If password provided and user has a password_hash, verify it (demo users bypass for seamless one-click switch)
+  if (user.passwordHash) {
+    if (!password) {
+      throw new Error('Password is required.');
+    }
+    const isValid = await verifyPassword(password, user.passwordHash);
+    if (!isValid) {
+      throw new Error('Invalid email or password.');
+    }
+  }
+
+  user.status = 'ONLINE';
+  user.lastSeen = 'Just now';
+  if (globalThis.__devconnect_store) {
+    globalThis.__devconnect_store.users.set(user.id, user);
+    saveStoreToDisk();
+  }
+
   const token = `devconn_token_${Date.now()}_${user.id}`;
   authStore.sessions.set(token, {
     userId: user.id,
@@ -89,7 +126,8 @@ export async function loginUser(email: string, password?: string): Promise<{ use
     expires: Date.now() + 7 * 86400 * 1000,
   });
 
-  return { user, token };
+  const { passwordHash: _, ...safeUser } = user;
+  return { user: safeUser as User, token };
 }
 
 export async function createPasswordResetToken(email: string): Promise<string> {

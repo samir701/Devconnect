@@ -37,10 +37,13 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     const { name, description, ownerId, githubRepo } = req.body || {};
     if (!name) return res.status(400).json({ error: 'Project name is required' });
 
+    const projectOwnerId = ownerId || (req.headers['x-user-id'] as string);
+    if (!projectOwnerId) return res.status(401).json({ error: 'Authentication required' });
+
     const project = await createProject({
       name,
       description: description || '',
-      ownerId: ownerId || 'user_samir',
+      ownerId: projectOwnerId,
       githubRepo: githubRepo || '',
       status: 'ACTIVE',
       channels: ['general', 'development', 'bugs', 'tasks', 'files', 'activity'],

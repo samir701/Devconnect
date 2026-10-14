@@ -329,26 +329,22 @@ export function AuthModal({ isOpen, onClose }: AuthModalProps) {
               </button>
             </form>
 
-            {/* Quick 1-Click Demo Profiles */}
-            <div className="pt-3 border-t border-white/10">
-              <span className="text-[10px] font-semibold uppercase tracking-wider text-slate-500 block mb-2">
-                1-Click Developer Demo Accounts
+            {/* Switch to Register */}
+            <div className="pt-3 border-t border-white/10 text-center">
+              <span className="text-xs text-slate-400">
+                Don&apos;t have an account yet?{' '}
+                <button
+                  type="button"
+                  onClick={() => {
+                    setTab('REGISTER');
+                    setError(null);
+                    setSuccessMsg(null);
+                  }}
+                  className="text-indigo-400 hover:text-indigo-300 font-medium hover:underline"
+                >
+                  Create one now
+                </button>
               </span>
-              <div className="grid grid-cols-2 gap-2">
-                {users.slice(0, 4).map((u) => (
-                  <button
-                    key={u.id}
-                    onClick={() => handleLogin(undefined, u.email)}
-                    className="flex items-center gap-2 p-2 rounded-xl bg-white/[0.03] hover:bg-white/10 border border-white/5 text-left transition-colors"
-                  >
-                    <Avatar name={u.name} avatarUrl={u.avatarUrl} size="xs" />
-                    <div className="min-w-0">
-                      <div className="text-xs font-medium text-white truncate">{u.name}</div>
-                      <div className="text-[10px] text-slate-400 truncate">{u.title.split('•')[0]}</div>
-                    </div>
-                  </button>
-                ))}
-              </div>
             </div>
           </div>
         )}
@@ -367,7 +363,7 @@ export function AuthModal({ isOpen, onClose }: AuthModalProps) {
                   required
                   value={name}
                   onChange={(e) => setName(e.target.value)}
-                  placeholder="e.g. Samir Brahma"
+                  placeholder="e.g. Alex Morgan"
                   className="w-full text-xs pl-8 pr-3 py-2 bg-white/5 border border-white/10 rounded-xl text-white outline-none"
                 />
               </div>
@@ -442,6 +438,23 @@ export function AuthModal({ isOpen, onClose }: AuthModalProps) {
             >
               {loading ? 'Creating Account...' : 'Create Developer Account'}
             </button>
+
+            <div className="pt-2 text-center">
+              <span className="text-xs text-slate-400">
+                Already have an account?{' '}
+                <button
+                  type="button"
+                  onClick={() => {
+                    setTab('LOGIN');
+                    setError(null);
+                    setSuccessMsg(null);
+                  }}
+                  className="text-indigo-400 hover:text-indigo-300 font-medium hover:underline"
+                >
+                  Sign in here
+                </button>
+              </span>
+            </div>
           </form>
         )}
 

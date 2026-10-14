@@ -25,18 +25,28 @@ interface EmailPayload {
 // ─── Config ───────────────────────────────────────────────────────────────────
 
 const MAIL_FROM_DOMAIN =
-  process.env.MAIL_FROM_DOMAIN || process.env.RESEND_FROM_DOMAIN || 'zettadev.app';
+  process.env.MAIL_FROM_DOMAIN || process.env.RESEND_FROM_DOMAIN || 'resend.dev';
 const FROM_ADDRESS =
-  MAIL_FROM_DOMAIN.includes('resend.dev')
+  process.env.RESEND_FROM_EMAIL ||
+  (MAIL_FROM_DOMAIN.includes('resend.dev')
     ? 'onboarding@resend.dev'
-    : `notifications@${MAIL_FROM_DOMAIN}`;
+    : `notifications@${MAIL_FROM_DOMAIN}`);
+
+function getResendApiKey(): string | undefined {
+  return process.env.RESEND_API_KEY?.trim();
+}
 
 // ─── Core Dispatcher ──────────────────────────────────────────────────────────
 
 async function sendEmail(payload: EmailPayload): Promise<void> {
-  const apiKey = process.env.RESEND_API_KEY;
+  const apiKey = getResendApiKey();
+  const isMock =
+    !apiKey ||
+    apiKey.includes('your_resend_api_key') ||
+    apiKey.includes('<your-resend-api-key>') ||
+    apiKey === 're_placeholder';
 
-  if (!apiKey) {
+  if (isMock) {
     // ── Mock mode: structured terminal log ──
     console.log('\n╔══════════════════════════════════════════════════════╗');
     console.log('║  📧  [ZettaDev Email Mock — No RESEND_API_KEY set]   ║');
@@ -54,7 +64,7 @@ async function sendEmail(payload: EmailPayload): Promise<void> {
   try {
     const { Resend } = await import('resend');
     const resend = new Resend(apiKey);
-    const { data, error } = await resend.emails.send({
+    let { data, error } = await resend.emails.send({
       from: payload.from,
       replyTo: payload.replyTo,
       to: [payload.to],
@@ -62,6 +72,25 @@ async function sendEmail(payload: EmailPayload): Promise<void> {
       html: payload.html,
       text: payload.text,
     });
+
+    // If custom domain is not verified in Resend yet, automatically fallback to onboarding@resend.dev
+    if (error && (error.message?.includes('not verified') || error.name === 'validation_error') && !payload.from.includes('onboarding@resend.dev')) {
+      console.warn('[Email] Domain unverified on Resend. Falling back to onboarding@resend.dev sandbox...');
+      const fallbackFrom = payload.from.includes('<')
+        ? payload.from.replace(/<[^>]+>/, '<onboarding@resend.dev>')
+        : 'ZettaDev <onboarding@resend.dev>';
+      const retryRes = await resend.emails.send({
+        from: fallbackFrom,
+        replyTo: payload.replyTo,
+        to: [payload.to],
+        subject: payload.subject,
+        html: payload.html,
+        text: payload.text,
+      });
+      data = retryRes.data;
+      error = retryRes.error;
+    }
+
     if (error) {
       console.error('[Email] Resend error dispatching to', payload.to, ':', error);
     } else {

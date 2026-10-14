@@ -8,15 +8,20 @@ import {
   getActivity,
   updateProject,
   archiveProject,
+  deleteProject,
+  isDatabaseConfigured,
 } from '@/lib/db';
 import { prisma } from '@/lib/prisma';
 import { checkProjectPermission, getSessionUserId } from '@/lib/auth-guard';
+import { emitRealtimeEvent } from '@/lib/activity';
+import { Project } from '@/lib/types';
 import { z } from 'zod';
 
 const UpdateProjectSchema = z.object({
   name: z.string().min(2).max(100).optional(),
   description: z.string().max(1000).optional(),
   githubRepo: z.string().max(255).optional(),
+  maxMembers: z.coerce.number().int().min(1).max(500).optional().nullable(),
 });
 
 export async function GET(
@@ -27,42 +32,43 @@ export async function GET(
     const { id } = await props.params;
     const userId = getSessionUserId(request);
 
-    // Try Prisma DB first
-    try {
-      const dbProject = await prisma.project.findUnique({
-        where: { id },
-        include: {
-          members: {
-            include: {
-              user: {
-                select: { id: true, name: true, email: true, avatarUrl: true, headline: true, status: true },
+    // Try Prisma DB first only if database is configured
+    if (isDatabaseConfigured) {
+      try {
+        const dbProject = await prisma.project.findUnique({
+          where: { id },
+          include: {
+            members: {
+              include: {
+                user: {
+                  select: { id: true, name: true, email: true, avatarUrl: true, headline: true, status: true },
+                },
               },
             },
+            tasks: true,
+            bugs: true,
+            attachments: true,
           },
-          tasks: true,
-          bugs: true,
-          attachments: true,
-        },
-      });
-
-      if (dbProject) {
-        const userMember = dbProject.members.find((m) => m.userId === userId);
-        const userRole = dbProject.ownerId === userId ? 'OWNER' : userMember?.role || null;
-
-        return NextResponse.json({
-          project: {
-            ...dbProject,
-            channels: dbProject.channels ? JSON.parse(dbProject.channels) : ['general', 'development', 'bugs', 'tasks', 'files', 'activity'],
-          },
-          members: dbProject.members,
-          tasks: dbProject.tasks,
-          bugs: dbProject.bugs,
-          attachments: dbProject.attachments,
-          userRole,
         });
+
+        if (dbProject) {
+          const userRole = 'OWNER';
+
+          return NextResponse.json({
+            project: {
+              ...dbProject,
+              channels: dbProject.channels ? JSON.parse(dbProject.channels) : ['general', 'development', 'bugs', 'tasks', 'files', 'activity'],
+            },
+            members: dbProject.members,
+            tasks: dbProject.tasks,
+            bugs: dbProject.bugs,
+            attachments: dbProject.attachments,
+            userRole,
+          });
+        }
+      } catch {
+        // Fallback to store
       }
-    } catch {
-      // Fallback to store
     }
 
     const project = await getProjectById(id);
@@ -78,8 +84,7 @@ export async function GET(
       getActivity(id),
     ]);
 
-    const userMember = members.find((m) => m.userId === userId);
-    const userRole = project.ownerId === userId ? 'OWNER' : userMember?.role || null;
+    const userRole = 'OWNER';
 
     return NextResponse.json({
       project,
@@ -120,31 +125,39 @@ export async function PATCH(
     }
 
     const data = validation.data;
+    const updateData: Partial<Project> = {
+      ...(data.name ? { name: data.name } : {}),
+      ...(data.description !== undefined ? { description: data.description } : {}),
+      ...(data.githubRepo !== undefined ? { githubRepo: data.githubRepo } : {}),
+      ...(data.maxMembers !== undefined ? { maxMembers: data.maxMembers === null ? undefined : data.maxMembers } : {}),
+    };
 
-    // Try Prisma update
-    try {
-      const updated = await prisma.project.update({
-        where: { id },
-        data: {
-          ...(data.name ? { name: data.name } : {}),
-          ...(data.description !== undefined ? { description: data.description } : {}),
-          ...(data.githubRepo !== undefined ? { githubRepo: data.githubRepo } : {}),
-        },
-      });
+    // Try Prisma update if configured
+    if (isDatabaseConfigured) {
+      try {
+        const updated = await prisma.project.update({
+          where: { id },
+          data: {
+            ...(data.name ? { name: data.name } : {}),
+            ...(data.description !== undefined ? { description: data.description } : {}),
+            ...(data.githubRepo !== undefined ? { githubRepo: data.githubRepo } : {}),
+          },
+        });
 
-      await updateProject(id, data);
+        const storeUpdated = await updateProject(id, updateData);
 
-      return NextResponse.json({
-        project: {
-          ...updated,
-          channels: updated.channels ? JSON.parse(updated.channels) : ['general', 'development', 'bugs', 'tasks', 'files', 'activity'],
-        },
-      });
-    } catch {
-      // Fallback to store
-      const updated = await updateProject(id, data);
-      return NextResponse.json({ project: updated });
+        return NextResponse.json({
+          project: {
+            ...updated,
+            maxMembers: storeUpdated?.maxMembers,
+            channels: updated.channels ? JSON.parse(updated.channels) : ['general', 'development', 'bugs', 'tasks', 'files', 'activity'],
+          },
+        });
+      } catch {}
     }
+
+    const updated = await updateProject(id, updateData);
+    return NextResponse.json({ project: updated });
   } catch (err: unknown) {
     const errorMsg = err instanceof Error ? err.message : 'Failed to update project';
     return NextResponse.json({ error: errorMsg }, { status: 500 });
@@ -166,22 +179,29 @@ export async function DELETE(
     }
 
     // Try Prisma soft-delete / archive
-    try {
-      await prisma.project.update({
-        where: { id },
-        data: { status: 'ARCHIVED' },
-      });
-    } catch {
-      // Ignore Prisma errors if running on store
+    if (isDatabaseConfigured) {
+      try {
+        await prisma.project.update({
+          where: { id },
+          data: { status: 'ARCHIVED' },
+        });
+      } catch {
+        // Ignore Prisma errors if running on store
+      }
     }
 
-    const archived = await archiveProject(id);
+    await deleteProject(id);
+    await archiveProject(id);
+
+    // Emit realtime event to immediately notify all clients
+    emitRealtimeEvent('project_deleted', { projectId: id }).catch(() => {});
+
     return NextResponse.json({
-      message: 'Project archived successfully',
-      project: archived,
+      message: 'Project deleted successfully',
+      projectId: id,
     });
   } catch (err: unknown) {
-    const errorMsg = err instanceof Error ? err.message : 'Failed to archive project';
+    const errorMsg = err instanceof Error ? err.message : 'Failed to delete project';
     return NextResponse.json({ error: errorMsg }, { status: 500 });
   }
 }

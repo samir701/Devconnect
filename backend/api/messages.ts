@@ -31,7 +31,9 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     }
 
     if (messageId && reaction && typeof messageId === 'string' && typeof reaction === 'string') {
-      const updated = await toggleMessageReaction(messageId, body.userId || 'user_samir', reaction);
+      const reactionUserId = (body.userId as string) || (req.headers['x-user-id'] as string);
+      if (!reactionUserId) return res.status(401).json({ error: 'Authentication required' });
+      const updated = await toggleMessageReaction(messageId, reactionUserId, reaction);
       return res.status(200).json({ message: updated });
     }
 
@@ -39,6 +41,11 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     let bugData = body.bugData;
     let taskData = body.taskData;
     const attachmentData = body.attachmentData;
+
+    const senderId = (body.senderId as string) || (req.headers['x-user-id'] as string);
+    if (!senderId) {
+      return res.status(401).json({ error: 'Authentication required' });
+    }
 
     if (body.messageType === 'BUG' && bugData && body.projectId) {
       bugData = await createBug({
@@ -49,7 +56,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
         priority: bugData.priority || 'HIGH',
         status: bugData.status || 'OPEN',
         assignedTo: bugData.assignedTo,
-        createdBy: body.senderId || 'user_samir',
+        createdBy: senderId,
       });
     }
 
@@ -61,7 +68,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
         priority: taskData.priority || 'MEDIUM',
         status: taskData.status || 'TODO',
         assignedTo: taskData.assignedTo,
-        createdBy: body.senderId || 'user_samir',
+        createdBy: senderId,
         dueDate: taskData.dueDate || 'Today',
       });
     }
@@ -69,7 +76,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     if (body.messageType === 'FILE' && attachmentData && body.projectId) {
       await createAttachment({
         projectId: body.projectId,
-        userId: body.senderId || 'user_samir',
+        userId: senderId,
         fileName: attachmentData.fileName,
         mimeType: attachmentData.mimeType,
         fileSize: attachmentData.fileSize,
@@ -83,7 +90,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       projectId: body.projectId,
       conversationId: body.conversationId,
       channel: body.channel || 'general',
-      senderId: body.senderId || 'user_samir',
+      senderId,
       messageType: body.messageType || 'TEXT',
       content: body.content,
       codeLanguage: body.codeLanguage,

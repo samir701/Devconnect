@@ -11,6 +11,7 @@ import {
   getSessionUserId,
   assertNotLastOwner,
 } from '@/lib/auth-guard';
+import { emitRealtimeEvent } from '@/lib/activity';
 import { ProjectRole } from '@/lib/types';
 import { z } from 'zod';
 
@@ -51,13 +52,6 @@ export async function PATCH(
       return NextResponse.json({ error: 'Project member not found' }, { status: 404 });
     }
 
-    // 3. Hierarchical Guard: ADMIN cannot change an OWNER's role
-    if (targetMember.role === 'OWNER' && guard.context.role !== 'OWNER') {
-      return NextResponse.json(
-        { error: 'Only Project Owners can modify an Owner’s role.' },
-        { status: 403 }
-      );
-    }
 
     // 4. Sole Owner Protection: Cannot demote the only OWNER
     if (targetMember.role === 'OWNER' && newRole !== 'OWNER') {
@@ -121,13 +115,6 @@ export async function DELETE(
         return NextResponse.json({ error: guard.error }, { status: guard.status });
       }
 
-      // ADMIN cannot remove an OWNER
-      if (targetMember.role === 'OWNER' && guard.context.role !== 'OWNER') {
-        return NextResponse.json(
-          { error: 'Only Project Owners can remove an Owner.' },
-          { status: 403 }
-        );
-      }
     }
 
     // Sole Owner Protection
@@ -151,6 +138,12 @@ export async function DELETE(
     if (!removed) {
       return NextResponse.json({ error: 'Failed to remove member' }, { status: 500 });
     }
+
+    emitRealtimeEvent('member_removed', {
+      projectId,
+      memberId: targetMember.id,
+      userId: targetMember.userId,
+    }).catch(() => {});
 
     return NextResponse.json({
       success: true,

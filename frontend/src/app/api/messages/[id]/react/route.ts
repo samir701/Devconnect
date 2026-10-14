@@ -1,5 +1,6 @@
 import { NextResponse } from 'next/server';
 import { toggleMessageReaction } from '@/lib/db';
+import { getSessionUserId } from '@/lib/auth-guard';
 
 export async function POST(
   request: Request,
@@ -8,7 +9,13 @@ export async function POST(
   try {
     const { id } = await props.params;
     const body = await request.json();
-    const { emoji, userId = 'user_samir' } = body;
+    const { emoji } = body;
+    const sessionUserId = getSessionUserId(request);
+    const userId = body.userId || sessionUserId;
+
+    if (!userId) {
+      return NextResponse.json({ error: 'Authentication required' }, { status: 401 });
+    }
 
     if (!emoji) {
       return NextResponse.json({ error: 'Emoji is required' }, { status: 400 });

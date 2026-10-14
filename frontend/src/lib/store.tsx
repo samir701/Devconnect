@@ -45,6 +45,7 @@ interface AppContextType {
 
   // Navigation & selection
   selectProject: (id: string) => void;
+  deleteProject: (projectId: string) => Promise<boolean>;
   selectChannel: (ch: string) => void;
   selectConversation: (conv: DirectConversation) => void;
 
@@ -90,6 +91,10 @@ interface AppContextType {
   setIsProfileOpen: (open: boolean) => void;
   isCreateProjectOpen: boolean;
   setIsCreateProjectOpen: (open: boolean) => void;
+  isDeleteProjectOpen: boolean;
+  setIsDeleteProjectOpen: (open: boolean) => void;
+  projectToDelete: Project | null;
+  setProjectToDelete: (proj: Project | null) => void;
   isProjectMembersOpen: boolean;
   setIsProjectMembersOpen: (open: boolean) => void;
   userRole: ProjectRole | null;
@@ -117,7 +122,9 @@ interface AppContextType {
   convertMessage: (messageId: string, payload: ConvertMessageRequest) => Promise<void>;
   openConvertModal: (msg: Message, defaultType?: 'TASK' | 'BUG') => void;
 
-  refreshData: () => Promise<void>;
+  refreshData: (isBackground?: boolean) => Promise<void>;
+  isAutoSyncActive: boolean;
+  lastSyncedAt: Date | null;
 
   // Phase 6 – Notifications
   notifications: AppNotification[];
@@ -135,6 +142,61 @@ interface AppContextType {
 }
 
 const AppContext = createContext<AppContextType | null>(null);
+
+// LocalStorage caching & view persistence helpers
+const getStorageItem = (key: string): string | null => {
+  if (typeof window === 'undefined') return null;
+  try {
+    return localStorage.getItem(key);
+  } catch {
+    return null;
+  }
+};
+
+const setStorageItem = (key: string, value: string) => {
+  if (typeof window === 'undefined') return;
+  try {
+    localStorage.setItem(key, value);
+  } catch {}
+};
+
+const getCachedMessages = (viewKey: string): Message[] | null => {
+  const raw = getStorageItem(`devconnect_msgs_${viewKey}`);
+  if (raw) {
+    try {
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed)) return parsed;
+    } catch {}
+  }
+  return null;
+};
+
+const setCachedMessages = (viewKey: string, msgs: Message[]) => {
+  try {
+    setStorageItem(`devconnect_msgs_${viewKey}`, JSON.stringify(msgs.slice(-100)));
+  } catch {}
+};
+
+const doesMessageMatchView = (
+  msg: Message,
+  currentConv: DirectConversation | null,
+  currentProjId: string | null,
+  currentChannel: string
+): boolean => {
+  if (currentConv) {
+    if (msg.conversationId === currentConv.id) return true;
+    const partsTarget = currentConv.id.replace('dm_', '').split('_').sort().join('_');
+    const partsMsg = (msg.conversationId || '').replace('dm_', '').split('_').sort().join('_');
+    return partsTarget.length > 0 && partsTarget === partsMsg;
+  }
+  if (currentProjId && msg.projectId && msg.projectId !== currentProjId) {
+    return false;
+  }
+  if (msg.channel === currentChannel) return true;
+  if (currentChannel === 'tasks' && (msg.messageType === 'TASK' || msg.taskData)) return true;
+  if (currentChannel === 'bugs' && (msg.messageType === 'BUG' || msg.bugData)) return true;
+  return false;
+};
 
 export function AppProvider({ children }: { children: React.ReactNode }) {
   const [currentUser, setCurrentUser] = useState<User | null>(null);
@@ -154,12 +216,29 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   const socketRef = useRef<Socket | null>(null);
   const [isSocketConnected, setIsSocketConnected] = useState(false);
 
+  const activeProjectIdRef = useRef(activeProjectId);
+  useEffect(() => {
+    activeProjectIdRef.current = activeProjectId;
+  }, [activeProjectId]);
+
+  const activeConversationRef = useRef(activeConversation);
+  useEffect(() => {
+    activeConversationRef.current = activeConversation;
+  }, [activeConversation]);
+
+  const activeChannelRef = useRef(activeChannel);
+  useEffect(() => {
+    activeChannelRef.current = activeChannel;
+  }, [activeChannel]);
+
   // Modals
   const [isSearchOpen, setIsSearchOpen] = useState(false);
   const [isCreateBugOpen, setIsCreateBugOpen] = useState(false);
   const [isCreateTaskOpen, setIsCreateTaskOpen] = useState(false);
   const [isProfileOpen, setIsProfileOpen] = useState(false);
   const [isCreateProjectOpen, setIsCreateProjectOpen] = useState(false);
+  const [isDeleteProjectOpen, setIsDeleteProjectOpen] = useState(false);
+  const [projectToDelete, setProjectToDelete] = useState<Project | null>(null);
   const [isProjectMembersOpen, setIsProjectMembersOpen] = useState(false);
   const [userRole, setUserRole] = useState<ProjectRole | null>(null);
   const [isStatusOpen, setIsStatusOpen] = useState(false);
@@ -191,51 +270,211 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   ]);
   const [isAiLoading, setIsAiLoading] = useState(false);
 
-  // Fetch base data
-  const refreshData = useCallback(async () => {
+  // Live Auto-Sync State
+  const [lastSyncedAt, setLastSyncedAt] = useState<Date | null>(null);
+  const isFetchingDetailsRef = useRef(false);
+  const isRefreshingBaseRef = useRef(false);
+
+  // Fetch base data (projects, users, conversations, user profile)
+  const refreshData = useCallback(async (isBackground = false) => {
     try {
       // 1. Current user
+      let loggedInUser: User | null = null;
       const userRes = await fetch('/api/auth/me');
       if (userRes.ok) {
         const uData = await userRes.json();
-        setCurrentUser(uData.user);
+        loggedInUser = uData.user || null;
+        setCurrentUser((prev) => {
+          if (
+            prev?.id === loggedInUser?.id &&
+            prev?.name === loggedInUser?.name &&
+            prev?.status === loggedInUser?.status
+          ) {
+            return prev;
+          }
+          return loggedInUser;
+        });
+      }
+
+      if (!loggedInUser && !isBackground) {
+        setIsAuthModalOpen(true);
       }
 
       // 2. Projects
       const projRes = await fetch('/api/projects');
       if (projRes.ok) {
         const pData = await projRes.json();
-        setProjects(pData.projects || []);
+        const newProjects: Project[] = pData.projects || [];
+        setProjects((prev) => {
+          if (prev.length === newProjects.length) {
+            let same = true;
+            for (let i = 0; i < prev.length; i++) {
+              if (
+                prev[i].id !== newProjects[i].id ||
+                prev[i].name !== newProjects[i].name ||
+                prev[i].status !== newProjects[i].status ||
+                prev[i].maxMembers !== newProjects[i].maxMembers
+              ) {
+                same = false;
+                break;
+              }
+            }
+            if (same) return prev;
+          }
+          return newProjects;
+        });
       }
 
-      // 3. Conversations
-      const convRes = await fetch('/api/conversations?userId=user_samir');
-      if (convRes.ok) {
-        const cData = await convRes.json();
-        setConversations(cData.conversations || []);
-        // Extract users from conversations
-        const foundUsers: User[] = (cData.conversations || [])
-          .map((c: DirectConversation) => c.otherUser)
-          .filter(Boolean);
-        setUsers(foundUsers);
+      // 3. Registered users for team selection and DMs
+      const usersRes = await fetch('/api/users');
+      if (usersRes.ok) {
+        const usersData = await usersRes.json();
+        const newUsers: User[] = usersData.users || [];
+        setUsers((prev) => {
+          if (prev.length === newUsers.length) {
+            let same = true;
+            for (let i = 0; i < prev.length; i++) {
+              if (
+                prev[i].id !== newUsers[i].id ||
+                prev[i].name !== newUsers[i].name ||
+                prev[i].status !== newUsers[i].status
+              ) {
+                same = false;
+                break;
+              }
+            }
+            if (same) return prev;
+          }
+          return newUsers;
+        });
+      }
+
+      // 4. Conversations
+      const effectiveUserId = loggedInUser?.id || currentUser?.id;
+      if (effectiveUserId) {
+        const convRes = await fetch(`/api/conversations?userId=${effectiveUserId}`);
+        if (convRes.ok) {
+          const cData = await convRes.json();
+          const convList: DirectConversation[] = (cData.conversations || []).filter((c: DirectConversation) => {
+            const email = (c.otherUser?.email || '').toLowerCase();
+            return !email.endsWith('@test.dev') && !email.endsWith('@example.com') && !email.includes('test_');
+          });
+          setConversations((prev) => {
+            if (prev.length === convList.length) {
+              let same = true;
+              for (let i = 0; i < prev.length; i++) {
+                if (
+                  prev[i].id !== convList[i].id ||
+                  prev[i].unreadCount !== convList[i].unreadCount ||
+                  prev[i].otherUser?.status !== convList[i].otherUser?.status ||
+                  prev[i].lastMessage !== convList[i].lastMessage
+                ) {
+                  same = false;
+                  break;
+                }
+              }
+              if (same) return prev;
+            }
+            return convList;
+          });
+
+          // Auto-restore active conversation if previously selected on initial mount
+          if (!isBackground) {
+            const savedConvId = getStorageItem('devconnect_active_conv_id');
+            if (savedConvId) {
+              const match = convList.find((c: DirectConversation) => c.id === savedConvId);
+              if (match) {
+                setActiveConversation(match);
+              }
+            }
+          }
+        }
+      } else {
+        setConversations([]);
       }
     } catch (err) {
-      console.error('Error fetching base data:', err);
+      if (!isBackground) {
+        console.error('Error fetching base data:', err);
+      }
     }
-  }, []);
+  }, [currentUser?.id]);
+
+  // Notifications fetcher
+  const fetchNotifications = useCallback(async () => {
+    if (!currentUser?.id) return;
+    try {
+      const res = await fetch('/api/notifications?limit=30');
+      if (res.ok) {
+        const data = await res.json();
+        const newNotifs: AppNotification[] = data.notifications || [];
+        setNotifications((prev) => {
+          if (prev.length === newNotifs.length) {
+            let same = true;
+            for (let i = 0; i < prev.length; i++) {
+              if (prev[i].id !== newNotifs[i].id || prev[i].read !== newNotifs[i].read) {
+                same = false;
+                break;
+              }
+            }
+            if (same) return prev;
+          }
+          return newNotifs;
+        });
+        setUnreadCount(data.unreadCount ?? 0);
+      }
+    } catch {
+      // Silent in background
+    }
+  }, [currentUser?.id]);
 
   // Fetch project details when activeProjectId or activeChannel or activeConversation changes
-  const fetchActiveDetails = useCallback(async () => {
+  const fetchActiveDetails = useCallback(async (isBackground = false) => {
+    const viewKey = activeConversation
+      ? `conv_${activeConversation.id}`
+      : `proj_${activeProjectId}_chan_${activeChannel}`;
+
+    // Instant optimistic render from cache on room change
+    if (!isBackground) {
+      const cached = getCachedMessages(viewKey);
+      if (cached && cached.length > 0) {
+        setMessages(cached);
+      }
+    }
+
     try {
       if (activeConversation) {
         // Fetch 1-to-1 messages
         const res = await fetch(`/api/messages?conversationId=${encodeURIComponent(activeConversation.id)}`);
         if (res.ok) {
           const mData = await res.json();
-          setMessages(mData.messages || []);
+          const fetchedMsgs: Message[] = mData.messages || [];
+          setMessages((prev) => {
+            if (prev.length === fetchedMsgs.length) {
+              let isSame = true;
+              for (let i = 0; i < prev.length; i++) {
+                const p = prev[i];
+                const f = fetchedMsgs[i];
+                if (
+                  p.id !== f.id ||
+                  p.content !== f.content ||
+                  p.isEdited !== f.isEdited ||
+                  p.isPinned !== f.isPinned ||
+                  (p.reactions?.length || 0) !== (f.reactions?.length || 0) ||
+                  p.taskData?.status !== f.taskData?.status ||
+                  p.bugData?.status !== f.bugData?.status
+                ) {
+                  isSame = false;
+                  break;
+                }
+              }
+              if (isSame) return prev;
+            }
+            setCachedMessages(viewKey, fetchedMsgs);
+            return fetchedMsgs;
+          });
         }
       } else if (activeProjectId) {
-        // Fetch project info
+        // Fetch project info & channel messages
         const [projRes, msgRes] = await Promise.all([
           fetch(`/api/projects/${activeProjectId}`),
           fetch(`/api/messages?projectId=${activeProjectId}&channel=${activeChannel}`),
@@ -243,31 +482,202 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
 
         if (projRes.ok) {
           const pData = await projRes.json();
-          setMembers(pData.members || []);
+          if (pData.members) {
+            setMembers((prev) => {
+              if (prev.length === pData.members.length) {
+                let same = true;
+                for (let i = 0; i < prev.length; i++) {
+                  if (
+                    prev[i].id !== pData.members[i].id ||
+                    prev[i].role !== pData.members[i].role ||
+                    prev[i].user?.status !== pData.members[i].user?.status
+                  ) {
+                    same = false;
+                    break;
+                  }
+                }
+                if (same) return prev;
+              }
+              return pData.members;
+            });
+          }
           setUserRole(pData.userRole || null);
-          setTasks(pData.tasks || []);
-          setBugs(pData.bugs || []);
-          setAttachments(pData.attachments || []);
-          setActivity(pData.activity || []);
+          if (pData.tasks) {
+            setTasks((prev) => {
+              if (prev.length === pData.tasks.length) {
+                let same = true;
+                for (let i = 0; i < prev.length; i++) {
+                  if (
+                    prev[i].id !== pData.tasks[i].id ||
+                    prev[i].status !== pData.tasks[i].status ||
+                    prev[i].title !== pData.tasks[i].title ||
+                    prev[i].priority !== pData.tasks[i].priority
+                  ) {
+                    same = false;
+                    break;
+                  }
+                }
+                if (same) return prev;
+              }
+              return pData.tasks;
+            });
+          }
+          if (pData.bugs) {
+            setBugs((prev) => {
+              if (prev.length === pData.bugs.length) {
+                let same = true;
+                for (let i = 0; i < prev.length; i++) {
+                  if (
+                    prev[i].id !== pData.bugs[i].id ||
+                    prev[i].status !== pData.bugs[i].status ||
+                    prev[i].title !== pData.bugs[i].title ||
+                    prev[i].priority !== pData.bugs[i].priority
+                  ) {
+                    same = false;
+                    break;
+                  }
+                }
+                if (same) return prev;
+              }
+              return pData.bugs;
+            });
+          }
+          if (pData.attachments) {
+            setAttachments((prev) => {
+              if (prev.length === pData.attachments.length) {
+                let same = true;
+                for (let i = 0; i < prev.length; i++) {
+                  if (
+                    prev[i].id !== pData.attachments[i].id ||
+                    prev[i].fileName !== pData.attachments[i].fileName
+                  ) {
+                    same = false;
+                    break;
+                  }
+                }
+                if (same) return prev;
+              }
+              return pData.attachments;
+            });
+          }
+          if (pData.activity) {
+            setActivity((prev) => {
+              if (prev.length === pData.activity.length) {
+                let same = true;
+                for (let i = 0; i < prev.length; i++) {
+                  if (
+                    prev[i].id !== pData.activity[i].id ||
+                    prev[i].title !== pData.activity[i].title
+                  ) {
+                    same = false;
+                    break;
+                  }
+                }
+                if (same) return prev;
+              }
+              return pData.activity;
+            });
+          }
         }
 
         if (msgRes.ok) {
           const mData = await msgRes.json();
-          setMessages(mData.messages || []);
+          const fetchedMsgs: Message[] = mData.messages || [];
+          setMessages((prev) => {
+            if (prev.length === fetchedMsgs.length) {
+              let isSame = true;
+              for (let i = 0; i < prev.length; i++) {
+                const p = prev[i];
+                const f = fetchedMsgs[i];
+                if (
+                  p.id !== f.id ||
+                  p.content !== f.content ||
+                  p.isEdited !== f.isEdited ||
+                  p.isPinned !== f.isPinned ||
+                  (p.reactions?.length || 0) !== (f.reactions?.length || 0) ||
+                  p.taskData?.status !== f.taskData?.status ||
+                  p.bugData?.status !== f.bugData?.status
+                ) {
+                  isSame = false;
+                  break;
+                }
+              }
+              if (isSame) return prev;
+            }
+            setCachedMessages(viewKey, fetchedMsgs);
+            return fetchedMsgs;
+          });
         }
       }
     } catch (err) {
-      console.error('Error fetching active view details:', err);
+      if (!isBackground) {
+        console.error('Error fetching active view details:', err);
+      }
     }
   }, [activeProjectId, activeChannel, activeConversation]);
 
+  // Safely restore persisted view & cached messages from localStorage on client mount (prevents SSR hydration mismatch)
   useEffect(() => {
-    refreshData();
-  }, [refreshData]);
+    const savedProj = getStorageItem('devconnect_active_project');
+    if (savedProj) setActiveProjectId(savedProj);
 
+    const savedChan = getStorageItem('devconnect_active_channel');
+    if (savedChan) setActiveChannel(savedChan);
+
+    const savedConvId = getStorageItem('devconnect_active_conv_id');
+    const viewKey = savedConvId
+      ? `conv_${savedConvId}`
+      : `proj_${savedProj || 'proj_ai_employee'}_chan_${savedChan || 'general'}`;
+
+    const cached = getCachedMessages(viewKey);
+    if (cached && cached.length > 0) {
+      setMessages(cached);
+    }
+  }, []);
+
+  // Event-Driven & Trigger-Based Workspace Synchronization
+  // Eliminates continuous 3-second polling load on server.
+  // Instant refreshes are handled by Realtime Socket triggers (new text, member add/remove, group add/remove).
   useEffect(() => {
-    fetchActiveDetails();
-  }, [fetchActiveDetails]);
+    // Initial fetch on mount
+    refreshData(false);
+    fetchActiveDetails(false);
+    fetchNotifications();
+    setLastSyncedAt(new Date());
+
+    // Immediate sync on tab focus or visibility change
+    const onTabVisible = () => {
+      if (typeof document !== 'undefined' && !document.hidden) {
+        fetchActiveDetails(true);
+        refreshData(true);
+        fetchNotifications();
+        setLastSyncedAt(new Date());
+      }
+    };
+
+    if (typeof document !== 'undefined') {
+      document.addEventListener('visibilitychange', onTabVisible);
+      window.addEventListener('focus', onTabVisible);
+    }
+
+    // Relaxed low-frequency fallback ONLY when socket is disconnected (e.g. offline or socket error)
+    // Runs at 60 seconds (instead of 3 seconds) to ensure zero excessive server load
+    const fallbackTimer = setInterval(() => {
+      if (!isSocketConnected && typeof document !== 'undefined' && !document.hidden) {
+        fetchActiveDetails(true);
+        refreshData(true);
+        setLastSyncedAt(new Date());
+      }
+    }, 60000);
+
+    return () => {
+      clearInterval(fallbackTimer);
+      if (typeof document !== 'undefined') {
+        document.removeEventListener('visibilitychange', onTabVisible);
+        window.removeEventListener('focus', onTabVisible);
+      }
+    };
+  }, [fetchActiveDetails, refreshData, fetchNotifications, isSocketConnected]);
 
   // Connect to Realtime Socket.IO Server
   useEffect(() => {
@@ -309,15 +719,29 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     socket.on('new_message', (newMsg: Message) => {
       setMessages((prev) => {
         if (prev.some((m) => m.id === newMsg.id)) return prev;
-        if (
-          newMsg.channel === activeChannel ||
-          (activeChannel === 'tasks' && newMsg.messageType === 'TASK') ||
-          (activeChannel === 'bugs' && newMsg.messageType === 'BUG')
-        ) {
-          return [...prev, newMsg];
+        if (doesMessageMatchView(newMsg, activeConversationRef.current, activeProjectIdRef.current, activeChannelRef.current)) {
+          const updated = [...prev, newMsg];
+          const viewKey = activeConversationRef.current
+            ? `conv_${activeConversationRef.current.id}`
+            : `proj_${activeProjectIdRef.current}_chan_${activeChannelRef.current}`;
+          setCachedMessages(viewKey, updated);
+          return updated;
         }
         return prev;
       });
+
+      // If message involves a task, bug, or file, trigger active view refresh
+      if (
+        newMsg.messageType === 'TASK' ||
+        newMsg.messageType === 'BUG' ||
+        newMsg.messageType === 'FILE' ||
+        newMsg.taskData ||
+        newMsg.bugData ||
+        newMsg.attachmentData
+      ) {
+        fetchActiveDetails(true);
+      }
+      setLastSyncedAt(new Date());
     });
 
     // 2. Realtime Message Edit
@@ -478,6 +902,54 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       setUnreadCount((c) => c + 1);
     });
 
+    // 8. Realtime Project/Group Triggers (Group added or removed)
+    socket.on('project_created', () => {
+      refreshData(true);
+      setLastSyncedAt(new Date());
+    });
+
+    socket.on('project_deleted', (payload: { projectId?: string }) => {
+      refreshData(true);
+      setLastSyncedAt(new Date());
+      if (payload?.projectId) {
+        setProjects((prev) => {
+          const remaining = prev.filter((p) => p.id !== payload.projectId);
+          if (activeProjectIdRef.current === payload.projectId) {
+            if (remaining.length > 0) {
+              selectProject(remaining[0].id);
+            } else {
+              setActiveProjectId(null);
+            }
+          }
+          return remaining;
+        });
+      }
+    });
+
+    // 9. Realtime Project Member Triggers (Member added or removed)
+    socket.on('member_added', (payload: { projectId?: string }) => {
+      if (!payload?.projectId || activeProjectIdRef.current === payload.projectId) {
+        fetchActiveDetails(true);
+      }
+      refreshData(true);
+      setLastSyncedAt(new Date());
+    });
+
+    socket.on('member_removed', (payload: { projectId?: string }) => {
+      if (!payload?.projectId || activeProjectIdRef.current === payload.projectId) {
+        fetchActiveDetails(true);
+      }
+      refreshData(true);
+      setLastSyncedAt(new Date());
+    });
+
+    // 10. Realtime Global Workspace Sync Trigger
+    socket.on('workspace_sync', () => {
+      fetchActiveDetails(true);
+      refreshData(true);
+      setLastSyncedAt(new Date());
+    });
+
     return () => {
       socket.disconnect();
       socketRef.current = null;
@@ -509,17 +981,69 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     setActiveProjectId(id);
     setActiveConversation(null);
     setIsMobileSidebarOpen(false);
+    setStorageItem('devconnect_active_project', id);
+    if (typeof window !== 'undefined') localStorage.removeItem('devconnect_active_conv_id');
+    const key = `proj_${id}_chan_${activeChannel}`;
+    const cached = getCachedMessages(key);
+    if (cached) setMessages(cached);
+  };
+
+  const deleteProject = async (projectId: string): Promise<boolean> => {
+    try {
+      const res = await fetch(`/api/projects/${projectId}`, {
+        method: 'DELETE',
+      });
+
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        throw new Error(data.error || 'Failed to delete group');
+      }
+
+      // Optimistically update projects list and re-route if needed
+      setProjects((prev) => {
+        const remaining = prev.filter((p) => p.id !== projectId);
+        if (activeProjectId === projectId) {
+          if (remaining.length > 0) {
+            selectProject(remaining[0].id);
+          } else {
+            setActiveProjectId(null);
+          }
+        }
+        return remaining;
+      });
+
+      // Broadcast realtime trigger event to other tabs/collaborators
+      const socket = socketRef.current;
+      if (socket && socket.connected) {
+        socket.emit('project_deleted', { projectId });
+      }
+
+      await refreshData(true);
+      return true;
+    } catch (err) {
+      console.error('Failed to delete project:', err);
+      throw err;
+    }
   };
 
   const selectChannel = (ch: string) => {
     setActiveChannel(ch);
     setActiveConversation(null);
     setIsMobileSidebarOpen(false);
+    setStorageItem('devconnect_active_channel', ch);
+    if (typeof window !== 'undefined') localStorage.removeItem('devconnect_active_conv_id');
+    const key = `proj_${activeProjectId}_chan_${ch}`;
+    const cached = getCachedMessages(key);
+    if (cached) setMessages(cached);
   };
 
   const selectConversation = (conv: DirectConversation) => {
     setActiveConversation(conv);
     setIsMobileSidebarOpen(false);
+    setStorageItem('devconnect_active_conv_id', conv.id);
+    const key = `conv_${conv.id}`;
+    const cached = getCachedMessages(key);
+    if (cached) setMessages(cached);
   };
 
   const activeProject = projects.find((p) => p.id === activeProjectId) || null;
@@ -544,6 +1068,11 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         ? { projectId: activeProjectId, channel: activeChannel || 'general' }
         : {};
 
+      if (!currentUser) {
+        setIsAuthModalOpen(true);
+        return;
+      }
+
       const res = await fetch('/api/messages', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -552,7 +1081,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
           projectId: activeConversation ? undefined : activeProjectId,
           conversationId: activeConversation ? activeConversation.id : undefined,
           channel: activeConversation ? undefined : activeChannel,
-          senderId: currentUser?.id || 'user_samir',
+          senderId: currentUser.id,
         }),
       });
 
@@ -560,15 +1089,16 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         const data = await res.json();
         const createdMsg = data.message;
 
-        // Add to local state immediately if channel matches or is auto-grouped
+        // Add to local state immediately if channel/conv matches or is auto-grouped
         setMessages((prev) => {
           if (prev.some((m) => m.id === createdMsg.id)) return prev;
-          if (
-            createdMsg.channel === activeChannel ||
-            (activeChannel === 'tasks' && createdMsg.messageType === 'TASK') ||
-            (activeChannel === 'bugs' && createdMsg.messageType === 'BUG')
-          ) {
-            return [...prev, createdMsg];
+          if (doesMessageMatchView(createdMsg, activeConversation, activeProjectId, activeChannel)) {
+            const updated = [...prev, createdMsg];
+            const viewKey = activeConversation
+              ? `conv_${activeConversation.id}`
+              : `proj_${activeProjectId}_chan_${activeChannel}`;
+            setCachedMessages(viewKey, updated);
+            return updated;
           }
           return prev;
         });
@@ -599,20 +1129,32 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         ? { projectId: activeProjectId, channel: activeChannel || 'general' }
         : {};
 
+      if (!currentUser) {
+        setIsAuthModalOpen(true);
+        return;
+      }
+
       const res = await fetch(`/api/messages/${messageId}/react`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ emoji, userId: currentUser?.id || 'user_samir' }),
+        body: JSON.stringify({ emoji, userId: currentUser.id }),
       });
       if (res.ok) {
         const data = await res.json();
-        setMessages((prev) => prev.map((m) => (m.id === messageId ? data.message : m)));
+        setMessages((prev) => {
+          const updated = prev.map((m) => (m.id === messageId ? data.message : m));
+          const viewKey = activeConversation
+            ? `conv_${activeConversation.id}`
+            : `proj_${activeProjectId}_chan_${activeChannel}`;
+          setCachedMessages(viewKey, updated);
+          return updated;
+        });
 
         if (socket && socket.connected) {
           socket.emit('add_reaction', {
             messageId,
             emoji,
-            userId: currentUser?.id || 'user_samir',
+            userId: currentUser.id,
             ...roomPayload,
           });
         }
@@ -637,9 +1179,14 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         body: JSON.stringify({ content }),
       });
       if (res.ok) {
-        setMessages((prev) =>
-          prev.map((m) => (m.id === messageId ? { ...m, content, isEdited: true } : m))
-        );
+        setMessages((prev) => {
+          const updated = prev.map((m) => (m.id === messageId ? { ...m, content, isEdited: true } : m));
+          const viewKey = activeConversation
+            ? `conv_${activeConversation.id}`
+            : `proj_${activeProjectId}_chan_${activeChannel}`;
+          setCachedMessages(viewKey, updated);
+          return updated;
+        });
 
         if (socket && socket.connected) {
           socket.emit('edit_message', {
@@ -665,7 +1212,14 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
 
       const res = await fetch(`/api/messages/${messageId}`, { method: 'DELETE' });
       if (res.ok) {
-        setMessages((prev) => prev.filter((m) => m.id !== messageId));
+        setMessages((prev) => {
+          const updated = prev.filter((m) => m.id !== messageId);
+          const viewKey = activeConversation
+            ? `conv_${activeConversation.id}`
+            : `proj_${activeProjectId}_chan_${activeChannel}`;
+          setCachedMessages(viewKey, updated);
+          return updated;
+        });
 
         if (socket && socket.connected) {
           socket.emit('delete_message', {
@@ -710,13 +1264,22 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   const createTask = async (data: Partial<Task>): Promise<Task | null> => {
     if (!activeProjectId) return null;
     try {
+      const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+      if (currentUser?.id) {
+        headers['x-user-id'] = currentUser.id;
+      }
+      const token = typeof window !== 'undefined' ? localStorage.getItem('devconnect_token') : null;
+      if (token) {
+        headers['Authorization'] = `Bearer ${token}`;
+      }
+
       const res = await fetch('/api/tasks', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers,
         body: JSON.stringify({
           ...data,
           projectId: activeProjectId,
-          createdBy: currentUser?.id || 'user_samir',
+          createdBy: currentUser?.id || '',
         }),
       });
       if (res.ok) {
@@ -805,10 +1368,19 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     }
 
     try {
+      const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+      if (currentUser?.id) {
+        headers['x-user-id'] = currentUser.id;
+      }
+      const token = typeof window !== 'undefined' ? localStorage.getItem('devconnect_token') : null;
+      if (token) {
+        headers['Authorization'] = `Bearer ${token}`;
+      }
+
       const res = await fetch(`/api/tasks/${taskId}`, {
         method: 'PATCH',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ status }),
+        headers,
+        body: JSON.stringify({ status, userId: currentUser?.id }),
       });
       if (res.ok) {
         const data = await res.json();
@@ -836,7 +1408,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         body: JSON.stringify({
           ...data,
           projectId: activeProjectId,
-          createdBy: currentUser?.id || 'user_samir',
+          createdBy: currentUser?.id || '',
         }),
       });
       if (res.ok) {
@@ -1040,7 +1612,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         body: JSON.stringify({
           projectId: activeProjectId,
           prompt,
-          userId: currentUser?.id || 'user_samir',
+          userId: currentUser?.id || '',
         }),
       });
 
@@ -1113,25 +1685,16 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       await fetch('/api/auth/logout', { method: 'POST' });
     } catch {}
     localStorage.removeItem('devconnect_token');
+    localStorage.removeItem('devconnect_user_id');
+    localStorage.removeItem('devconnect_active_conv_id');
+    setCurrentUser(null);
+    setConversations([]);
+    setActiveConversation(null);
     setIsProfileOpen(false);
     setIsAuthModalOpen(true);
   };
 
   // ── Phase 6: Notification actions ─────────────────────────────────────────
-
-  const fetchNotifications = useCallback(async () => {
-    if (!currentUser?.id) return;
-    try {
-      const res = await fetch('/api/notifications?limit=30');
-      if (res.ok) {
-        const data = await res.json();
-        setNotifications(data.notifications || []);
-        setUnreadCount(data.unreadCount ?? 0);
-      }
-    } catch (err) {
-      console.error('Failed to fetch notifications:', err);
-    }
-  }, [currentUser?.id]);
 
   const markNotifRead = async (id: string) => {
     try {
@@ -1218,6 +1781,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         triggerTyping,
         isSocketConnected,
         selectProject,
+        deleteProject,
         selectChannel,
         selectConversation,
         sendMessage,
@@ -1242,6 +1806,10 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         setIsProfileOpen,
         isCreateProjectOpen,
         setIsCreateProjectOpen,
+        isDeleteProjectOpen,
+        setIsDeleteProjectOpen,
+        projectToDelete,
+        setProjectToDelete,
         isProjectMembersOpen,
         setIsProjectMembersOpen,
         userRole,
@@ -1267,6 +1835,8 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         convertMessage,
         openConvertModal,
         refreshData,
+        isAutoSyncActive: true,
+        lastSyncedAt,
         // Phase 6 – Notifications
         notifications,
         unreadCount,

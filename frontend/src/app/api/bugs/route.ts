@@ -1,5 +1,6 @@
 import { NextResponse } from 'next/server';
 import { getBugs, createBug } from '@/lib/db';
+import { getSessionUserId } from '@/lib/auth-guard';
 
 export async function GET(request: Request) {
   const { searchParams } = new URL(request.url);
@@ -33,6 +34,13 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: 'Title and projectId are required' }, { status: 400 });
     }
 
+    const sessionUserId = getSessionUserId(request);
+    const creatorId = body.createdBy || sessionUserId;
+    if (!creatorId) {
+      return NextResponse.json({ error: 'Authentication required' }, { status: 401 });
+    }
+    const assigneeId = body.assignedTo || creatorId;
+
     const bug = await createBug({
       projectId: body.projectId,
       messageId: body.messageId,
@@ -41,8 +49,8 @@ export async function POST(request: Request) {
       endpoint: body.endpoint || '',
       priority: body.priority || 'HIGH',
       status: body.status || 'OPEN',
-      assignedTo: body.assignedTo || 'user_samir',
-      createdBy: body.createdBy || 'user_samir',
+      assignedTo: assigneeId,
+      createdBy: creatorId,
     });
 
     return NextResponse.json({ bug }, { status: 201 });

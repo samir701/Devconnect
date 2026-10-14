@@ -19,7 +19,7 @@ export function ConvertMessageModal({ message, isOpen, onClose }: ConvertMessage
   const [title, setTitle] = useState('');
   const [description, setDescription] = useState('');
   const [priority, setPriority] = useState<PriorityLevel>('MEDIUM');
-  const [assignedTo, setAssignedTo] = useState('user_samir');
+  const [assignedTo, setAssignedTo] = useState(currentUser?.id || '');
   const [dueDate, setDueDate] = useState('Today');
   const [endpoint, setEndpoint] = useState('/api/v1/...');
   const [isSubmitting, setIsSubmitting] = useState(false);
@@ -42,9 +42,9 @@ export function ConvertMessageModal({ message, isOpen, onClose }: ConvertMessage
         setPriority('MEDIUM');
       }
 
-      setAssignedTo(currentUser?.id || 'user_samir');
+      setAssignedTo(currentUser?.id || (users[0]?.id || ''));
     }
-  }, [message, isOpen, currentUser]);
+  }, [message, isOpen, currentUser, users]);
 
   if (!isOpen || !message) return null;
 

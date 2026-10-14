@@ -9,6 +9,7 @@ import {
 } from '@/lib/db';
 import { prisma } from '@/lib/prisma';
 import { checkProjectPermission, getSessionUserId } from '@/lib/auth-guard';
+import { emitRealtimeEvent } from '@/lib/activity';
 import { ProjectRole } from '@/lib/types';
 import { z } from 'zod';
 
@@ -107,8 +108,23 @@ export async function POST(
       );
     }
 
-    // Check if user is already a member
+    // Check capacity limit
+    const project = await getProjectById(projectId);
+    if (!project) {
+      return NextResponse.json({ error: 'Project not found' }, { status: 404 });
+    }
+
     const existingMembers = await getProjectMembers(projectId);
+    if (project.maxMembers && existingMembers.length >= project.maxMembers) {
+      return NextResponse.json(
+        {
+          error: `Project has reached its maximum capacity of ${project.maxMembers} members. Increase member limit in settings to add more.`,
+        },
+        { status: 400 }
+      );
+    }
+
+    // Check if user is already a member
     const existing = existingMembers.find((m) => m.userId === targetUser?.id);
     if (existing) {
       return NextResponse.json(
@@ -117,13 +133,16 @@ export async function POST(
       );
     }
 
+    // All members are added as OWNER with full access
+    const assignedRole: ProjectRole = 'OWNER';
+
     // Try Prisma DB insert
     try {
       const createdMember = await prisma.projectMember.create({
         data: {
           projectId,
           userId: targetUser.id,
-          role: role as ProjectRole,
+          role: assignedRole,
         },
         include: {
           user: {
@@ -133,12 +152,15 @@ export async function POST(
       });
 
       // Sync store
-      await addProjectMember(projectId, targetUser.id, role as ProjectRole);
+      await addProjectMember(projectId, targetUser.id, assignedRole);
+
+      emitRealtimeEvent('member_added', { projectId, member: createdMember, userId: targetUser.id }).catch(() => {});
 
       return NextResponse.json({ member: createdMember }, { status: 201 });
     } catch {
       // Store fallback
-      const member = await addProjectMember(projectId, targetUser.id, role as ProjectRole);
+      const member = await addProjectMember(projectId, targetUser.id, assignedRole);
+      emitRealtimeEvent('member_added', { projectId, member, userId: targetUser.id }).catch(() => {});
       return NextResponse.json({ member }, { status: 201 });
     }
   } catch (err: unknown) {

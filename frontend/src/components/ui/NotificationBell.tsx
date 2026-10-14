@@ -67,8 +67,8 @@ function NotifItem({ notif }: { notif: AppNotification }) {
   return (
     <button
       onClick={handleClick}
-      className={`w-full text-left flex gap-3 px-4 py-3 transition-all hover:bg-white/5 group ${
-        notif.read ? 'opacity-60' : ''
+      className={`w-full text-left flex gap-3 px-4 py-3 transition-all hover:bg-white/[0.06] border-b border-white/[0.04] last:border-b-0 group cursor-pointer ${
+        notif.read ? 'opacity-60 bg-transparent' : 'bg-white/[0.02]'
       }`}
     >
       {/* Icon + priority dot */}
@@ -134,12 +134,12 @@ export function NotificationBell() {
   const normal = notifications.filter((n) => n.priority !== 'HIGH' || n.read);
 
   return (
-    <div className="relative" ref={popoverRef}>
+    <div className="relative z-50" ref={popoverRef}>
       {/* Bell button */}
       <button
         id="notification-bell-btn"
         onClick={() => setIsNotifOpen(!isNotifOpen)}
-        className={`relative p-2 rounded-xl transition-all ${
+        className={`relative p-2 rounded-xl transition-all cursor-pointer ${
           isNotifOpen
             ? 'bg-indigo-600/20 text-indigo-300 border border-indigo-500/30'
             : 'text-slate-400 hover:text-white hover:bg-white/8 border border-transparent'
@@ -157,8 +157,8 @@ export function NotificationBell() {
       {/* Popover */}
       {isNotifOpen && (
         <div
-          className="absolute right-0 top-full mt-2 w-[360px] max-h-[500px] flex flex-col rounded-2xl border border-white/10 shadow-2xl shadow-black/60 z-[200] overflow-hidden"
-          style={{ background: 'linear-gradient(180deg, #161b22 0%, #0d1117 100%)' }}
+          className="absolute right-0 top-full mt-2 w-[380px] max-h-[520px] flex flex-col rounded-2xl border border-white/15 shadow-[0_25px_60px_-15px_rgba(0,0,0,0.95)] z-[100] overflow-hidden bg-[#0d121f] ring-1 ring-white/10 animate-in fade-in slide-in-from-top-2 duration-150"
+          style={{ background: 'linear-gradient(180deg, #141a29 0%, #0b0f19 100%)' }}
         >
           {/* Header */}
           <div className="flex items-center justify-between px-4 py-3 border-b border-white/10 shrink-0">

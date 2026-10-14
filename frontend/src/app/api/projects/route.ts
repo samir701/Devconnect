@@ -1,22 +1,25 @@
 import { NextResponse } from 'next/server';
-import { getProjectsForUser, createProject, getProjects } from '@/lib/db';
+import { getProjectsForUser, createProject, getProjects, isDatabaseConfigured } from '@/lib/db';
 import { prisma } from '@/lib/prisma';
 import { getSessionUserId } from '@/lib/auth-guard';
+import { emitRealtimeEvent } from '@/lib/activity';
 import { z } from 'zod';
 
 const CreateProjectSchema = z.object({
   name: z.string().min(2, 'Project name must be at least 2 characters').max(100),
   description: z.string().max(1000).optional().default(''),
   githubRepo: z.string().max(255).optional().default(''),
+  maxMembers: z.coerce.number().int().min(1, 'Max members must be at least 1').max(500, 'Max members cannot exceed 500').optional().nullable(),
 });
 
 export async function GET(request: Request) {
   try {
     const userId = getSessionUserId(request);
 
-    // Try Prisma DB query
-    try {
-      const dbProjects = await prisma.project.findMany({
+    // Try Prisma DB query only when database is configured
+    if (isDatabaseConfigured) {
+      try {
+        const dbProjects = await prisma.project.findMany({
         where: {
           status: 'ACTIVE',
           OR: [
@@ -46,6 +49,7 @@ export async function GET(request: Request) {
     } catch {
       // Fallback to store
     }
+    }
 
     const projects = await getProjectsForUser(userId);
     // If user has no scoped projects yet, return active projects
@@ -70,67 +74,78 @@ export async function POST(request: Request) {
       );
     }
 
-    const { name, description, githubRepo } = validation.data;
+    const { name, description, githubRepo, maxMembers } = validation.data;
 
-    // Execute atomic transaction in Prisma
-    try {
-      const project = await prisma.$transaction(async (tx) => {
-        const created = await tx.project.create({
-          data: {
-            name,
-            description,
-            ownerId: userId,
-            githubRepo: githubRepo || null,
-            status: 'ACTIVE',
-            channels: JSON.stringify(['general', 'development', 'bugs', 'tasks', 'files', 'activity']),
-          },
+    // Execute atomic transaction in Prisma if database configured
+    if (isDatabaseConfigured) {
+      try {
+        const project = await prisma.$transaction(async (tx) => {
+          const created = await tx.project.create({
+            data: {
+              name,
+              description,
+              ownerId: userId,
+              githubRepo: githubRepo || null,
+              status: 'ACTIVE',
+              channels: JSON.stringify(['general', 'development', 'bugs', 'tasks', 'files', 'activity']),
+            },
+          });
+
+          await tx.projectMember.create({
+            data: {
+              projectId: created.id,
+              userId,
+              role: 'OWNER',
+            },
+          });
+
+          return created;
         });
 
-        await tx.projectMember.create({
-          data: {
-            projectId: created.id,
-            userId,
-            role: 'OWNER',
-          },
+        // Synchronize in-memory store for instant UI reactivity
+        const storeProject = await createProject({
+          id: project.id,
+          name,
+          description,
+          ownerId: userId,
+          githubRepo,
+          status: 'ACTIVE',
+          channels: ['general', 'development', 'bugs', 'tasks', 'files', 'activity'],
+          maxMembers: maxMembers || undefined,
         });
 
-        return created;
-      });
+        const formattedProject = {
+          ...project,
+          id: project.id || storeProject.id,
+          channels: ['general', 'development', 'bugs', 'tasks', 'files', 'activity'],
+          maxMembers: maxMembers || undefined,
+        };
 
-      // Synchronize in-memory store for instant UI reactivity
-      const storeProject = await createProject({
-        id: project.id,
-        name,
-        description,
-        ownerId: userId,
-        githubRepo,
-        status: 'ACTIVE',
-        channels: ['general', 'development', 'bugs', 'tasks', 'files', 'activity'],
-      });
+        emitRealtimeEvent('project_created', { project: formattedProject }).catch(() => {});
 
-      return NextResponse.json(
-        {
-          project: {
-            ...project,
-            id: project.id || storeProject.id,
-            channels: ['general', 'development', 'bugs', 'tasks', 'files', 'activity'],
+        return NextResponse.json(
+          {
+            project: formattedProject,
           },
-        },
-        { status: 201 }
-      );
-    } catch {
-      // Fallback to atomic in-memory creation
-      const project = await createProject({
-        name,
-        description,
-        ownerId: userId,
-        githubRepo,
-        status: 'ACTIVE',
-        channels: ['general', 'development', 'bugs', 'tasks', 'files', 'activity'],
-      });
-
-      return NextResponse.json({ project }, { status: 201 });
+          { status: 201 }
+        );
+      } catch {}
     }
+
+    // Fallback to atomic in-memory creation
+    const project = await createProject({
+      name,
+      description,
+      ownerId: userId,
+      githubRepo,
+      status: 'ACTIVE',
+      channels: ['general', 'development', 'bugs', 'tasks', 'files', 'activity'],
+      maxMembers: maxMembers || undefined,
+    });
+
+    emitRealtimeEvent('project_created', { project }).catch(() => {});
+
+    return NextResponse.json({ project }, { status: 201 });
   } catch (err: unknown) {
     const errorMsg = err instanceof Error ? err.message : 'Failed to create project';
     return NextResponse.json({ error: errorMsg }, { status: 500 });

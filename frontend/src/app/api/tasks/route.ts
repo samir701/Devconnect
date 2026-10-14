@@ -1,8 +1,9 @@
 import { NextResponse } from 'next/server';
-import { getTasks, createTask } from '@/lib/db';
+import { getTasks, createTask, getUserById, getProjectById } from '@/lib/db';
 import { prisma } from '@/lib/prisma';
 import { createNotification, getUserNotificationPreferences } from '@/lib/notifications';
 import { sendTaskAssignedEmail } from '@/lib/email/notifications';
+import { getSessionUserId } from '@/lib/auth-guard';
 
 export async function GET(request: Request) {
   const { searchParams } = new URL(request.url);
@@ -36,8 +37,12 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: 'Title and projectId are required' }, { status: 400 });
     }
 
-    const creatorId = body.createdBy || 'user_samir';
-    const assigneeId = body.assignedTo || 'user_samir';
+    const sessionUserId = getSessionUserId(request);
+    const creatorId = body.createdBy || sessionUserId;
+    if (!creatorId) {
+      return NextResponse.json({ error: 'Authentication required' }, { status: 401 });
+    }
+    const assigneeId = body.assignedTo || creatorId;
 
     const task = await createTask({
       projectId: body.projectId,

@@ -10,12 +10,25 @@ export async function POST(request: Request) {
 
     const { user, token } = await loginUser(email, password);
 
-    return NextResponse.json({
+    const res = NextResponse.json({
       success: true,
       user,
       token,
       message: 'Login successful!',
     });
+
+    res.cookies.set('devconnect_token', token, {
+      path: '/',
+      maxAge: 7 * 86400,
+      sameSite: 'lax',
+    });
+    res.cookies.set('devconnect_user_id', user.id, {
+      path: '/',
+      maxAge: 7 * 86400,
+      sameSite: 'lax',
+    });
+
+    return res;
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : 'Invalid login credentials';
     return NextResponse.json({ error: msg }, { status: 401 });
