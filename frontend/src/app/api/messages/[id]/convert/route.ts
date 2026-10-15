@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server';
 import { getSessionUserId, checkProjectPermission } from '@/lib/auth-guard';
-import { createTask, createBug } from '@/lib/db';
+import { createTask, createBug, getUserById, getProjectById } from '@/lib/db';
+import { sendTaskAssignedEmail } from '@/lib/email/notifications';
 import { prisma } from '@/lib/prisma';
 import { logActivity, emitRealtimeEvent } from '@/lib/activity';
 import { ProjectRole, PriorityLevel, TaskStatus, BugStatus } from '@/lib/types';
@@ -124,6 +125,28 @@ export async function POST(
         convertedType: 'TASK',
         task,
       });
+
+      // Dispatch task assigned email notification via Resend tracking login emails from TiDB database
+      if (task.assignedTo && task.assignedTo !== userId) {
+        try {
+          const [creatorUser, assigneeUser, projectData] = await Promise.all([
+            getUserById(userId),
+            getUserById(task.assignedTo),
+            getProjectById(projectId),
+          ]);
+          if (creatorUser && assigneeUser && assigneeUser.email) {
+            console.log(`[Converted Task] Dispatching task assigned email from ${creatorUser.email} to ${assigneeUser.email}`);
+            await sendTaskAssignedEmail({
+              task,
+              creator: { name: creatorUser.name || 'Project Member', email: creatorUser.email },
+              assignee: { name: assigneeUser.name || 'Assignee', email: assigneeUser.email },
+              project: { name: projectData?.name || 'Devconnect Workspace' },
+            });
+          }
+        } catch (taskEmailErr) {
+          console.error('[Converted Task] Email notification error:', taskEmailErr);
+        }
+      }
 
       return NextResponse.json({
         success: true,

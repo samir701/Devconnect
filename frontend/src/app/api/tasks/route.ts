@@ -75,36 +75,32 @@ export async function POST(request: Request) {
           });
         }
 
-        // Email notification
-        if (assigneePrefs.emailOnTaskAssigned) {
-          let creatorUser = null;
-          let assigneeUser = null;
-          let projectData = null;
+        // Email notification via Resend tracking login emails from TiDB database
+        let creatorUser = null;
+        let assigneeUser = null;
+        let projectData = null;
 
-          try {
-            [creatorUser, assigneeUser, projectData] = await Promise.all([
-              prisma.user.findUnique({ where: { id: creatorId }, select: { name: true, email: true } }),
-              prisma.user.findUnique({ where: { id: assigneeId }, select: { name: true, email: true } }),
-              prisma.project.findUnique({ where: { id: body.projectId }, select: { name: true } }),
-            ]);
-          } catch {}
+        try {
+          [creatorUser, assigneeUser, projectData] = await Promise.all([
+            getUserById(creatorId),
+            getUserById(assigneeId),
+            getProjectById(body.projectId),
+          ]);
+        } catch (fetchErr) {
+          console.warn('[Tasks] User lookup error for email notification:', fetchErr);
+        }
 
-          if (!creatorUser) {
-            const u = await getUserById(creatorId);
-            if (u) creatorUser = { name: u.name, email: u.email };
-          }
-          if (!assigneeUser) {
-            const u = await getUserById(assigneeId);
-            if (u) assigneeUser = { name: u.name, email: u.email };
-          }
-          if (!projectData) {
-            const p = await getProjectById(body.projectId);
-            if (p) projectData = { name: p.name };
-          }
-
-          if (creatorUser && assigneeUser && projectData) {
-            sendTaskAssignedEmail({ task, creator: creatorUser, assignee: assigneeUser, project: projectData }).catch(console.error);
-          }
+        if (creatorUser && assigneeUser && assigneeUser.email) {
+          const finalProject = projectData || { name: 'Devconnect Workspace' };
+          console.log(`[Tasks] Dispatching task assigned email from ${creatorUser.email} to ${assigneeUser.email} for task: "${task.title}"`);
+          await sendTaskAssignedEmail({
+            task,
+            creator: { name: creatorUser.name || 'Project Member', email: creatorUser.email },
+            assignee: { name: assigneeUser.name || 'Assignee', email: assigneeUser.email },
+            project: { name: finalProject.name || 'Devconnect Workspace' },
+          });
+        } else {
+          console.warn('[Tasks] Could not dispatch task email - creator or assignee missing from TiDB:', { creatorId, assigneeId });
         }
       } catch (notifErr) {
         console.error('[Tasks] Notification error (non-fatal):', notifErr);

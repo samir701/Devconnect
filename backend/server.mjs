@@ -310,7 +310,7 @@ function persistMessageToLocalStore(msg) {
           reactions: [],
           sender: {
             id: payload.senderId || userId,
-            name: payload.senderName || (payload.senderId === 'user_debmalya' ? 'Debmalya Sen' : 'Samir Patra'),
+            name: payload.sender?.name || payload.senderName || 'Developer',
             status: 'ONLINE',
           },
         };

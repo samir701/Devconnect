@@ -3,16 +3,17 @@
 import React from 'react';
 import { Task, TaskStatus } from '@/lib/types';
 import { Badge } from '@/components/ui/Badge';
-import { CheckSquare, Square, Calendar, User, CheckCircle2 } from 'lucide-react';
+import { CheckSquare, Square, Calendar, User, CheckCircle2, Loader2 } from 'lucide-react';
 import { useAppStore } from '@/lib/store';
 
 interface TaskCardProps {
   task: Task;
+  isSending?: boolean;
 }
 
 const TASK_STATUSES: TaskStatus[] = ['TODO', 'IN_PROGRESS', 'REVIEW', 'COMPLETED'];
 
-export function TaskCard({ task }: TaskCardProps) {
+export function TaskCard({ task, isSending = false }: TaskCardProps) {
   const { updateTaskStatus, setActiveRightTab, setIsRightPanelOpen, users, members } = useAppStore();
   const [currentStatus, setCurrentStatus] = React.useState<TaskStatus>(task.status);
 
@@ -25,10 +26,12 @@ export function TaskCard({ task }: TaskCardProps) {
     (task.assignedTo && task.assignee?.id === task.assignedTo ? task.assignee : null) ||
     users.find((u) => u.id === task.assignedTo) ||
     members.find((m) => m.userId === task.assignedTo)?.user ||
-    task.assigneeUser ||
-    task.assignee;
+    (task.assigneeUser && task.assigneeUser.name ? task.assigneeUser : null) ||
+    (task.assignee && task.assignee.name ? task.assignee : null);
 
-  const assigneeDisplayName = assignedUser?.name || (task.assignedTo ? 'Assigned' : 'Unassigned');
+  const assigneeDisplayName =
+    assignedUser?.name ||
+    (task.assignedTo ? (isSending ? 'Assigning...' : 'Assigned') : 'Unassigned');
 
   const isCompleted = currentStatus === 'COMPLETED';
 
@@ -84,6 +87,12 @@ export function TaskCard({ task }: TaskCardProps) {
         </div>
 
         <div className="flex items-center gap-1.5 shrink-0">
+          {isSending && (
+            <span className="flex items-center gap-1 text-[10px] font-medium text-amber-300 bg-amber-500/15 border border-amber-500/30 px-2 py-0.5 rounded-full animate-pulse shadow-sm">
+              <Loader2 className="w-3 h-3 animate-spin text-amber-400" />
+              <span>Assigning...</span>
+            </span>
+          )}
           <Badge variant="priority" value={task.priority}>
             {task.priority}
           </Badge>
@@ -104,7 +113,14 @@ export function TaskCard({ task }: TaskCardProps) {
         <div className="flex items-center gap-3">
           <div className="flex items-center gap-1 text-[11px] text-slate-400">
             <User className="w-3 h-3 text-slate-500" />
-            <span className="text-slate-200 font-medium">{assigneeDisplayName}</span>
+            {isSending && !assignedUser?.name ? (
+              <span className="flex items-center gap-1 text-amber-300 font-medium">
+                <Loader2 className="w-2.5 h-2.5 animate-spin text-amber-400" />
+                <span>Loading assignee...</span>
+              </span>
+            ) : (
+              <span className="text-slate-200 font-medium">{assigneeDisplayName}</span>
+            )}
           </div>
 
           {task.dueDate && (
@@ -118,8 +134,9 @@ export function TaskCard({ task }: TaskCardProps) {
         <div className="flex items-center gap-2">
           <select
             value={currentStatus}
+            disabled={isSending}
             onChange={(e) => handleStatusChange(e.target.value as TaskStatus)}
-            className="text-[11px] bg-slate-900 text-white font-medium border border-indigo-500/40 rounded-md px-2 py-0.5 outline-none cursor-pointer hover:border-indigo-400 focus:ring-1 focus:ring-indigo-500 transition-colors"
+            className="text-[11px] bg-slate-900 text-white font-medium border border-indigo-500/40 rounded-md px-2 py-0.5 outline-none cursor-pointer hover:border-indigo-400 focus:ring-1 focus:ring-indigo-500 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
           >
             {TASK_STATUSES.map((st) => (
               <option key={st} value={st} className="bg-slate-900 text-white">

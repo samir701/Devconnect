@@ -48,7 +48,7 @@ const TIDB_HOST = process.env.TIDB_HOST || 'gateway01.ap-southeast-1.prod.aws.ti
 
 export const isDatabaseConfigured = true;
 
-let tidbClient: ReturnType<typeof connect> | null = null;
+export let tidbClient: ReturnType<typeof connect> | null = null;
 
 try {
   tidbClient = connect({ url: DATABASE_URL });
@@ -303,8 +303,25 @@ export async function getUsers(): Promise<User[]> {
         .filter((u) => !u.email.endsWith('@test.dev') && !u.email.endsWith('@example.com'));
     }
   } catch (err) {
-    console.warn('[DB] Failed to fetch users from database, using local store:', err);
+    console.warn('[DB] Prisma fetch users failed, attempting TiDB serverless:', err);
   }
+
+  if (tidbClient) {
+    try {
+      const rows = (await tidbClient.execute('SELECT * FROM users')) as any[];
+      if (rows && rows.length > 0) {
+        for (const u of rows) {
+          store.users.set(u.id, mapDbUserToUser(u));
+        }
+        return rows
+          .map(mapDbUserToUser)
+          .filter((u) => !u.email.endsWith('@test.dev') && !u.email.endsWith('@example.com'));
+      }
+    } catch (tidbErr) {
+      console.warn('[TiDB] Failed to fetch users via serverless:', tidbErr);
+    }
+  }
+
   return Array.from(store.users.values()).filter(
     (u) => !u.email.endsWith('@test.dev') && !u.email.endsWith('@example.com')
   );
@@ -319,8 +336,22 @@ export async function getUserById(id: string): Promise<User | null> {
       return mapped;
     }
   } catch (err) {
-    console.warn('[DB] Failed to fetch user by id from database:', err);
+    // Prisma may fail if port 4000 raw TCP is unreachable, fall through to TiDB serverless
   }
+
+  if (tidbClient) {
+    try {
+      const rows = (await tidbClient.execute('SELECT * FROM users WHERE id = ? LIMIT 1', [id])) as any[];
+      if (rows && rows.length > 0) {
+        const mapped = mapDbUserToUser(rows[0]);
+        store.users.set(mapped.id, mapped);
+        return mapped;
+      }
+    } catch (tidbErr) {
+      console.warn('[TiDB] Failed to fetch user by id via serverless:', tidbErr);
+    }
+  }
+
   return store.users.get(id) || null;
 }
 
@@ -333,8 +364,22 @@ export async function getUserByEmail(email: string): Promise<User | null> {
       return mapped;
     }
   } catch (err) {
-    console.warn('[DB] Failed to fetch user by email from database:', err);
+    // Prisma may fail, fall through to TiDB serverless
   }
+
+  if (tidbClient) {
+    try {
+      const rows = (await tidbClient.execute('SELECT * FROM users WHERE LOWER(email) = LOWER(?) LIMIT 1', [email])) as any[];
+      if (rows && rows.length > 0) {
+        const mapped = mapDbUserToUser(rows[0]);
+        store.users.set(mapped.id, mapped);
+        return mapped;
+      }
+    } catch (tidbErr) {
+      console.warn('[TiDB] Failed to fetch user by email via serverless:', tidbErr);
+    }
+  }
+
   const users = Array.from(store.users.values());
   return users.find((u) => u.email.toLowerCase() === email.toLowerCase()) || null;
 }
@@ -354,7 +399,26 @@ export async function createUser(userData: User): Promise<User> {
       },
     });
   } catch (err) {
-    console.warn('[DB] Failed to create user in database:', err);
+    console.warn('[DB] Prisma createUser failed, using TiDB serverless fallback:', err);
+    if (tidbClient) {
+      try {
+        await tidbClient.execute(
+          `INSERT INTO users (id, name, email, passwordHash, avatarUrl, headline, skills, status, createdAt, updatedAt)
+           VALUES (?, ?, ?, ?, ?, ?, ?, 'AVAILABLE', NOW(), NOW())`,
+          [
+            userData.id,
+            userData.name,
+            userData.email,
+            userData.passwordHash || null,
+            userData.avatarUrl || null,
+            userData.title || null,
+            JSON.stringify(userData.skills || []),
+          ]
+        );
+      } catch (tidbErr) {
+        console.warn('[TiDB] Failed to create user via serverless:', tidbErr);
+      }
+    }
   }
   store.users.set(userData.id, userData);
   saveStoreToDisk();
@@ -431,6 +495,35 @@ export async function getProjectById(id: string): Promise<Project | null> {
       }
     } catch { }
   }
+
+  if (tidbClient) {
+    try {
+      const rows = (await tidbClient.execute('SELECT * FROM projects WHERE id = ? LIMIT 1', [id])) as any[];
+      if (rows && rows.length > 0) {
+        const row = rows[0];
+        let channels = ['general', 'development', 'bugs', 'tasks', 'files', 'activity'];
+        if (row.channels) {
+          try {
+            channels = typeof row.channels === 'string' ? JSON.parse(row.channels) : row.channels;
+          } catch {}
+        }
+        return {
+          id: row.id,
+          name: row.name,
+          description: row.description || '',
+          ownerId: row.ownerId,
+          githubRepo: row.githubRepo || undefined,
+          status: row.status as any,
+          channels,
+          createdAt: row.createdAt ? new Date(row.createdAt).toISOString() : new Date().toISOString(),
+          updatedAt: row.updatedAt ? new Date(row.updatedAt).toISOString() : new Date().toISOString(),
+        };
+      }
+    } catch (tidbErr) {
+      console.warn('[TiDB] Failed to fetch project via serverless:', tidbErr);
+    }
+  }
+
   return store.projects.get(id) || null;
 }
 
@@ -959,7 +1052,7 @@ export async function createMessage(msgData: Omit<Message, 'id' | 'createdAt'>):
     try {
       // 1. Ensure sender user exists in TiDB
       if (msgData.senderId) {
-        const dbSender = await prisma.user.findUnique({ where: { id: msgData.senderId } });
+        let dbSender = await prisma.user.findUnique({ where: { id: msgData.senderId } });
         if (!dbSender) {
           const storeSender = store.users.get(msgData.senderId);
           const safeStatus =
@@ -968,7 +1061,7 @@ export async function createMessage(msgData: Omit<Message, 'id' | 'createdAt'>):
               : storeSender?.status === 'OFFLINE'
                 ? 'OFFLINE'
                 : 'AVAILABLE';
-          await prisma.user.create({
+          dbSender = await prisma.user.create({
             data: {
               id: msgData.senderId,
               email: storeSender?.email || `${msgData.senderId}@zettadev.io`,
@@ -978,6 +1071,9 @@ export async function createMessage(msgData: Omit<Message, 'id' | 'createdAt'>):
               status: safeStatus,
             },
           });
+        }
+        if (dbSender) {
+          store.users.set(msgData.senderId, mapDbUserToUser(dbSender));
         }
       }
 
@@ -1457,14 +1553,50 @@ export async function updateTask(id: string, partial: Partial<Task>): Promise<Ta
     } catch (err) { }
   }
 
+  if (tidbClient) {
+    try {
+      const sets: string[] = [];
+      const values: any[] = [];
+      if (partial.title !== undefined) { sets.push('title = ?'); values.push(partial.title); }
+      if (partial.description !== undefined) { sets.push('description = ?'); values.push(partial.description); }
+      if (partial.priority !== undefined) { sets.push('priority = ?'); values.push(partial.priority); }
+      if (partial.status !== undefined) { sets.push('status = ?'); values.push(partial.status); }
+      if (partial.assignedTo !== undefined) { sets.push('assignedTo = ?'); values.push(partial.assignedTo); }
+      if (parsedDueDate !== undefined) { sets.push('dueDate = ?'); values.push(parsedDueDate); }
+      sets.push('updatedAt = NOW()');
+      if (sets.length > 0) {
+        const stripped = id.replace(/^task_/, '');
+        await tidbClient.execute(
+          `UPDATE tasks SET ${sets.join(', ')} WHERE id = ? OR id = ? OR messageId = ? OR messageId = ?`,
+          [...values, id, stripped, id, stripped]
+        );
+      }
+    } catch (tidbErr) {
+      console.warn('[TiDB] Failed to update task via serverless:', tidbErr);
+    }
+  }
+
   if (!updatedTask) {
-    if (!existing) return null;
+    let taskToUpdate = existing;
+    if (!taskToUpdate && tidbClient) {
+      try {
+        const stripped = id.replace(/^task_/, '');
+        const rows = (await tidbClient.execute(
+          'SELECT * FROM tasks WHERE id = ? OR id = ? OR messageId = ? OR messageId = ? LIMIT 1',
+          [id, stripped, id, stripped]
+        )) as any[];
+        if (rows && rows.length > 0) {
+          taskToUpdate = rows[0];
+        }
+      } catch {}
+    }
+    if (!taskToUpdate) return null;
     updatedTask = {
-      ...existing,
+      ...taskToUpdate,
       ...partial,
       updatedAt: new Date().toISOString(),
-      assigneeUser: (partial.assignedTo || existing.assignedTo) ? store.users.get(partial.assignedTo || existing.assignedTo!) : undefined,
-      creatorUser: store.users.get(existing.createdBy),
+      assigneeUser: (partial.assignedTo || taskToUpdate.assignedTo) ? store.users.get(partial.assignedTo || taskToUpdate.assignedTo!) : undefined,
+      creatorUser: store.users.get(taskToUpdate.createdBy),
     };
   }
 

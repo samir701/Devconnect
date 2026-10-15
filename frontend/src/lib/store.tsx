@@ -987,8 +987,20 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
 
         let updated: Message[];
         if (tempMatchIndex >= 0) {
+          const oldTemp = prev[tempMatchIndex];
           updated = prev.map((m, idx) =>
-            idx === tempMatchIndex ? { ...newMsg, status: 'delivered' as const } : m
+            idx === tempMatchIndex
+              ? {
+                  ...oldTemp,
+                  ...newMsg,
+                  metadata: newMsg.metadata || oldTemp.metadata,
+                  taskData: newMsg.taskData || oldTemp.taskData,
+                  bugData: newMsg.bugData || oldTemp.bugData,
+                  attachmentData: newMsg.attachmentData || oldTemp.attachmentData,
+                  sender: newMsg.sender || oldTemp.sender,
+                  status: 'delivered' as const,
+                }
+              : m
           );
         } else if (
           doesMessageMatchView(
@@ -1447,7 +1459,20 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
           const hasReal = prev.some((m) => m.id === createdMsg.id);
           let updated: Message[];
           if (hasTemp) {
-            updated = prev.map((m) => (m.id === tempId ? createdMsg : m));
+            updated = prev.map((m) =>
+              m.id === tempId
+                ? {
+                    ...m,
+                    ...createdMsg,
+                    metadata: createdMsg.metadata || m.metadata,
+                    taskData: createdMsg.taskData || m.taskData,
+                    bugData: createdMsg.bugData || m.bugData,
+                    attachmentData: createdMsg.attachmentData || m.attachmentData,
+                    sender: createdMsg.sender || m.sender,
+                    status: 'delivered' as const,
+                  }
+                : m
+            );
           } else if (!hasReal) {
             updated = [...prev, createdMsg];
           } else {

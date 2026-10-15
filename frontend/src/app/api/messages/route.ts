@@ -6,11 +6,13 @@ import {
   createTask,
   createAttachment,
   updateAttachment,
+  getUserById,
+  getProjectById,
 } from '@/lib/db';
 import { detectSecrets } from '@/lib/secretDetector';
 import { prisma } from '@/lib/prisma';
 import { createNotification, getUserNotificationPreferences } from '@/lib/notifications';
-import { sendMentionEmail } from '@/lib/email/notifications';
+import { sendMentionEmail, sendTaskAssignedEmail } from '@/lib/email/notifications';
 import { getSessionUserId } from '@/lib/auth-guard';
 import { emitRealtimeEvent } from '@/lib/activity';
 
@@ -75,6 +77,27 @@ export async function POST(request: Request) {
           createdBy: senderId,
           dueDate: taskData.dueDate || 'Today',
         });
+      }
+
+      if (taskData?.assignedTo && taskData.assignedTo !== senderId) {
+        try {
+          const [creatorUser, assigneeUser, projectData] = await Promise.all([
+            getUserById(senderId),
+            getUserById(taskData.assignedTo),
+            getProjectById(body.projectId),
+          ]);
+          if (creatorUser && assigneeUser && assigneeUser.email) {
+            console.log(`[Messages Task] Dispatching task assigned email from ${creatorUser.email} to ${assigneeUser.email}`);
+            await sendTaskAssignedEmail({
+              task: taskData,
+              creator: { name: creatorUser.name || 'Project Member', email: creatorUser.email },
+              assignee: { name: assigneeUser.name || 'Assignee', email: assigneeUser.email },
+              project: { name: projectData?.name || 'Devconnect Workspace' },
+            });
+          }
+        } catch (taskEmailErr) {
+          console.error('[Messages Task] Email notification error:', taskEmailErr);
+        }
       }
     }
 

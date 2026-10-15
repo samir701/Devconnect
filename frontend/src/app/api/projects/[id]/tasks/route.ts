@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server';
 import { getSessionUserId, checkProjectPermission } from '@/lib/auth-guard';
-import { getTasks, createTask, createMessage } from '@/lib/db';
+import { getTasks, createTask, createMessage, getUserById, getProjectById } from '@/lib/db';
+import { sendTaskAssignedEmail } from '@/lib/email/notifications';
 import { ProjectRole } from '@/lib/types';
 
 const MUTATION_ROLES: ProjectRole[] = ['OWNER', 'ADMIN', 'DEVELOPER', 'QA'];
@@ -95,6 +96,29 @@ export async function POST(
         });
       } catch (err) {
         // Message creation non-blocking
+      }
+    }
+
+    // Email notification via Resend tracking login emails from TiDB database
+    if (task.assignedTo && task.assignedTo !== userId) {
+      try {
+        const [creatorUser, assigneeUser, projectData] = await Promise.all([
+          getUserById(userId),
+          getUserById(task.assignedTo),
+          getProjectById(projectId),
+        ]);
+
+        if (creatorUser && assigneeUser && assigneeUser.email) {
+          console.log(`[Project Tasks] Dispatching task assigned email from ${creatorUser.email} to ${assigneeUser.email} for task: "${task.title}"`);
+          await sendTaskAssignedEmail({
+            task,
+            creator: { name: creatorUser.name || 'Project Member', email: creatorUser.email },
+            assignee: { name: assigneeUser.name || 'Assignee', email: assigneeUser.email },
+            project: { name: projectData?.name || 'Devconnect Workspace' },
+          });
+        }
+      } catch (notifErr) {
+        console.error('[Project Tasks] Notification error (non-fatal):', notifErr);
       }
     }
 

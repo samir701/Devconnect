@@ -3,16 +3,17 @@
 import React from 'react';
 import { Bug, BugStatus } from '@/lib/types';
 import { Badge } from '@/components/ui/Badge';
-import { Bug as BugIcon, ChevronRight, User, CheckCircle2 } from 'lucide-react';
+import { Bug as BugIcon, ChevronRight, User, CheckCircle2, Loader2 } from 'lucide-react';
 import { useAppStore } from '@/lib/store';
 
 interface BugCardProps {
   bug: Bug;
+  isSending?: boolean;
 }
 
 const BUG_STATUSES: BugStatus[] = ['OPEN', 'INVESTIGATING', 'IN_PROGRESS', 'FIXED', 'CLOSED'];
 
-export function BugCard({ bug }: BugCardProps) {
+export function BugCard({ bug, isSending = false }: BugCardProps) {
   const { updateBugStatus, setActiveRightTab, setIsRightPanelOpen, users, members } = useAppStore();
 
   const assignedUser =
@@ -20,10 +21,12 @@ export function BugCard({ bug }: BugCardProps) {
     (bug.assignedTo && bug.assignee?.id === bug.assignedTo ? bug.assignee : null) ||
     users.find((u) => u.id === bug.assignedTo) ||
     members.find((m) => m.userId === bug.assignedTo)?.user ||
-    bug.assigneeUser ||
-    bug.assignee;
+    (bug.assigneeUser && bug.assigneeUser.name ? bug.assigneeUser : null) ||
+    (bug.assignee && bug.assignee.name ? bug.assignee : null);
 
-  const assigneeDisplayName = assignedUser?.name || (bug.assignedTo ? 'Assigned' : 'Unassigned');
+  const assigneeDisplayName =
+    assignedUser?.name ||
+    (bug.assignedTo ? (isSending ? 'Assigning...' : 'Assigned') : 'Unassigned');
 
   const handleStatusChange = (newStatus: BugStatus) => {
     updateBugStatus(bug.id, newStatus);
@@ -51,6 +54,12 @@ export function BugCard({ bug }: BugCardProps) {
         </div>
 
         <div className="flex items-center gap-2">
+          {isSending && (
+            <span className="flex items-center gap-1 text-[10px] font-medium text-amber-300 bg-amber-500/15 border border-amber-500/30 px-2 py-0.5 rounded-full animate-pulse shadow-sm">
+              <Loader2 className="w-3 h-3 animate-spin text-amber-400" />
+              <span>Syncing...</span>
+            </span>
+          )}
           <Badge variant="priority" value={bug.priority}>
             {bug.priority}
           </Badge>
@@ -80,9 +89,16 @@ export function BugCard({ bug }: BugCardProps) {
           <div className="flex items-center gap-1.5 text-[11px] text-slate-400">
             <User className="w-3 h-3 text-slate-500" />
             <span>Assigned:</span>
-            <span className="text-slate-200 font-medium">
-              {assigneeDisplayName}
-            </span>
+            {isSending && !assignedUser?.name ? (
+              <span className="flex items-center gap-1 text-amber-300 font-medium">
+                <Loader2 className="w-2.5 h-2.5 animate-spin text-amber-400" />
+                <span>Loading assignee...</span>
+              </span>
+            ) : (
+              <span className="text-slate-200 font-medium">
+                {assigneeDisplayName}
+              </span>
+            )}
           </div>
         </div>
 

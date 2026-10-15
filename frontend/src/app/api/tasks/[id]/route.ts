@@ -1,6 +1,6 @@
 import { NextResponse } from 'next/server';
 import { getSessionUserId, checkProjectPermission } from '@/lib/auth-guard';
-import { updateTask, getUserById, getProjectById } from '@/lib/db';
+import { updateTask, getUserById, getProjectById, tidbClient } from '@/lib/db';
 import { prisma } from '@/lib/prisma';
 import { ProjectRole } from '@/lib/types';
 import { createNotification, getUserNotificationPreferences } from '@/lib/notifications';
@@ -102,6 +102,21 @@ export async function PATCH(
           }
         } catch {}
       }
+
+      if (!existingTask && tidbClient) {
+        try {
+          const stripped = id.replace(/^task_/, '');
+          const rows = (await tidbClient.execute(
+            'SELECT * FROM tasks WHERE id = ? OR id = ? OR messageId = ? OR messageId = ? LIMIT 1',
+            [id, stripped, id, stripped]
+          )) as any[];
+          if (rows && rows.length > 0) {
+            existingTask = rows[0];
+          }
+        } catch (tidbErr) {
+          console.warn('[TiDB] Failed to query task via serverless in PATCH:', tidbErr);
+        }
+      }
     }
 
     if (!existingTask) {
@@ -121,57 +136,63 @@ export async function PATCH(
       return NextResponse.json({ error: 'Task not found' }, { status: 404 });
     }
 
-    // ── Phase 6: Notify task creator when task is marked COMPLETED ────────────
+    // ── Phase 6: Notify task creator when task is marked COMPLETED (tick in checkbox) ──
     const isNowCompleted = body.status === 'COMPLETED' && previousStatus !== 'COMPLETED';
     const creatorId = existingTask.createdBy;
-    const completerId = body.userId || body.completedBy || userId;
+    const completerId = body.userId || body.completedBy || userId || existingTask.assignedTo;
 
-    if (isNowCompleted && creatorId && completerId !== creatorId) {
+    if (isNowCompleted && creatorId) {
       try {
-        const creatorPrefs = await getUserNotificationPreferences(creatorId);
-        if (creatorPrefs.inAppAll) {
+        let completer = null;
+        let creator = null;
+        let project = null;
+
+        try {
+          [creator, completer, project] = await Promise.all([
+            getUserById(creatorId),
+            getUserById(completerId),
+            getProjectById(existingTask.projectId),
+          ]);
+        } catch (fetchErr) {
+          console.warn('[Tasks] User lookup error for completion notification:', fetchErr);
+        }
+
+        if (!completer && existingTask.assignedTo) {
+          completer = await getUserById(existingTask.assignedTo);
+        }
+        if (!completer) {
+          completer = { name: 'Team Member', email: 'team@devconnect.dev' } as any;
+        }
+        if (!project) {
+          project = { name: 'Devconnect Workspace' };
+        }
+
+        // In-app notification
+        try {
           await createNotification({
             recipientId: creatorId,
-            senderId: completerId,
+            senderId: completerId || creatorId,
             projectId: existingTask.projectId,
             type: 'TASK_COMPLETED',
             priority: 'NORMAL',
             title: `Task Completed: ${existingTask.title}`,
-            message: `Your task "${existingTask.title}" has been marked as completed.`,
+            message: `Your task "${existingTask.title}" has been marked as completed by ${completer.name || 'a team member'}.`,
             entityId: existingTask.id,
             entityType: 'TASK',
           });
-        }
+        } catch {}
 
-        if (creatorPrefs.emailOnTaskCompleted) {
-          let completer = null;
-          let creator = null;
-          let project = null;
-
-          try {
-            [completer, creator, project] = await Promise.all([
-              prisma.user.findUnique({ where: { id: completerId }, select: { name: true, email: true } }),
-              prisma.user.findUnique({ where: { id: creatorId }, select: { name: true, email: true } }),
-              prisma.project.findUnique({ where: { id: existingTask.projectId }, select: { name: true } }),
-            ]);
-          } catch {}
-
-          if (!completer) {
-            const u = await getUserById(completerId);
-            if (u) completer = { name: u.name, email: u.email };
-          }
-          if (!creator) {
-            const u = await getUserById(creatorId);
-            if (u) creator = { name: u.name, email: u.email };
-          }
-          if (!project) {
-            const p = await getProjectById(existingTask.projectId);
-            if (p) project = { name: p.name };
-          }
-
-          if (completer && creator && project) {
-            sendTaskCompletedEmail({ task: existingTask, completer, creator, project }).catch(console.error);
-          }
+        // Resend transactional email notification to Person A (task creator)
+        if (creator && creator.email) {
+          console.log(`[Tasks] Dispatching task completed email to creator ${creator.email} via Resend for task: "${existingTask.title}"`);
+          await sendTaskCompletedEmail({
+            task: existingTask,
+            completer: { name: completer.name || 'Team Member', email: completer.email || 'team@devconnect.dev' },
+            creator: { name: creator.name || 'Task Creator', email: creator.email },
+            project: { name: project.name || 'Devconnect Workspace' },
+          });
+        } else {
+          console.warn('[Tasks] Could not find creator email in TiDB for completion notification:', creatorId);
         }
       } catch (notifErr) {
         console.error('[Tasks] Completion notification error (non-fatal):', notifErr);
@@ -180,52 +201,22 @@ export async function PATCH(
 
     // ── Phase 6: Notify newly assigned team member if assignedTo changed ──────
     const newAssigneeId = body.assignedTo;
-    if (newAssigneeId && newAssigneeId !== existingTask.assignedTo && newAssigneeId !== completerId) {
+    if (newAssigneeId && newAssigneeId !== existingTask.assignedTo) {
       try {
-        const assigneePrefs = await getUserNotificationPreferences(newAssigneeId);
-        if (assigneePrefs.inAppAll) {
-          await createNotification({
-            recipientId: newAssigneeId,
-            senderId: completerId,
-            projectId: existingTask.projectId,
-            type: 'TASK_ASSIGNED',
-            priority: 'HIGH',
-            title: `Task Assigned: ${existingTask.title}`,
-            message: `You have been assigned a task: "${existingTask.title}"`,
-            entityId: existingTask.id,
-            entityType: 'TASK',
+        const [assigner, assignee, project] = await Promise.all([
+          getUserById(completerId),
+          getUserById(newAssigneeId),
+          getProjectById(existingTask.projectId),
+        ]);
+
+        if (assignee && assignee.email) {
+          console.log(`[Tasks] Dispatching reassignment email to ${assignee.email} via Resend`);
+          await sendTaskAssignedEmail({
+            task: existingTask,
+            creator: { name: assigner?.name || 'Project Member', email: assigner?.email || 'notifications@devconnect.dev' },
+            assignee: { name: assignee.name || 'Assignee', email: assignee.email },
+            project: { name: project?.name || 'Devconnect Workspace' },
           });
-        }
-
-        if (assigneePrefs.emailOnTaskAssigned) {
-          let assigner = null;
-          let assignee = null;
-          let project = null;
-
-          try {
-            [assigner, assignee, project] = await Promise.all([
-              prisma.user.findUnique({ where: { id: completerId }, select: { name: true, email: true } }),
-              prisma.user.findUnique({ where: { id: newAssigneeId }, select: { name: true, email: true } }),
-              prisma.project.findUnique({ where: { id: existingTask.projectId }, select: { name: true } }),
-            ]);
-          } catch {}
-
-          if (!assigner) {
-            const u = await getUserById(completerId);
-            if (u) assigner = { name: u.name, email: u.email };
-          }
-          if (!assignee) {
-            const u = await getUserById(newAssigneeId);
-            if (u) assignee = { name: u.name, email: u.email };
-          }
-          if (!project) {
-            const p = await getProjectById(existingTask.projectId);
-            if (p) project = { name: p.name };
-          }
-
-          if (assigner && assignee && project) {
-            sendTaskAssignedEmail({ task: existingTask, creator: assigner, assignee, project }).catch(console.error);
-          }
         }
       } catch (assignErr) {
         console.error('[Tasks] Assignment notification error (non-fatal):', assignErr);

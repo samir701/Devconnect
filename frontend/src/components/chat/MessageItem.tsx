@@ -1,7 +1,7 @@
 'use client';
 
 import React, { useState } from 'react';
-import { Message } from '@/lib/types';
+import { Message, Task, Bug } from '@/lib/types';
 import { Avatar } from '@/components/ui/Avatar';
 import { CodeBlock } from './CodeBlock';
 import { BugCard } from './BugCard';
@@ -95,8 +95,6 @@ export function MessageItem({ message, onReplySelect, isConsecutive = false }: M
   const [editContent, setEditContent] = useState(message.content);
   const [isSavingEdit, setIsSavingEdit] = useState(false);
 
-  const isMe = currentUser?.id === message.senderId;
-
   const handleCopy = () => {
     navigator.clipboard.writeText(message.content);
     setIsMenuOpen(false);
@@ -141,20 +139,37 @@ export function MessageItem({ message, onReplySelect, isConsecutive = false }: M
     message.bugData?.assigneeUser ||
     (bugAssignedTo === message.senderId ? message.sender : undefined);
 
-  const resolvedBug = storeBug || message.bugData || (message.messageType === 'BUG' ? {
-    id: targetBugId,
-    projectId: message.projectId || 'proj_ai_employee',
+  const rawBugContentDesc = message.content.includes('\n')
+    ? message.content.replace(/^🐛\s*(?:\*\*\[BUG\]\*\*)?:?[^\n]*\n?/i, '').trim()
+    : '';
+
+  const bugDescription =
+    (storeBug?.description && storeBug.description.trim()) ||
+    (message.bugData?.description && message.bugData.description.trim()) ||
+    (bugMeta?.description && bugMeta.description.trim()) ||
+    (rawBugContentDesc || undefined);
+
+  const bugTitle =
+    (storeBug?.title && storeBug.title.trim()) ||
+    (message.bugData?.title && message.bugData.title.trim()) ||
+    (bugMeta?.title && bugMeta.title.trim()) ||
+    message.content.replace(/^🐛\s*(?:\*\*\[BUG\]\*\*)?:?\s*/i, '').split('\n')[0].slice(0, 80).trim() ||
+    'Bug Report';
+
+  const resolvedBug: Bug | null = (storeBug || message.bugData || message.messageType === 'BUG') ? {
+    id: storeBug?.id || message.bugData?.id || bugMeta?.bugId || `bug_${message.id}`,
+    projectId: storeBug?.projectId || message.bugData?.projectId || message.projectId || 'proj_ai_employee',
     messageId: message.id,
-    title: bugMeta?.title || message.content.replace(/^🐛\s*(?:\*\*\[BUG\]\*\*)?:?\s*/i, '').slice(0, 80) || 'Bug Report',
-    description: bugMeta?.description || message.content,
-    endpoint: bugMeta?.endpoint || '',
-    priority: bugMeta?.priority || 'HIGH',
-    status: bugMeta?.status || 'OPEN',
-    assignedTo: bugAssignedTo || message.senderId,
+    title: bugTitle,
+    description: bugDescription,
+    endpoint: storeBug?.endpoint || message.bugData?.endpoint || bugMeta?.endpoint || '',
+    priority: storeBug?.priority || message.bugData?.priority || bugMeta?.priority || 'HIGH',
+    status: storeBug?.status || message.bugData?.status || bugMeta?.status || 'OPEN',
+    assignedTo: bugAssignedTo,
     assigneeUser: bugAssigneeUser,
-    createdBy: message.senderId,
-    createdAt: message.createdAt,
-  } : null);
+    createdBy: storeBug?.createdBy || message.bugData?.createdBy || message.senderId,
+    createdAt: storeBug?.createdAt || message.bugData?.createdAt || message.createdAt,
+  } : null;
 
   // Resolve Task data synced with store
   let taskMeta: any = null;
@@ -173,20 +188,49 @@ export function MessageItem({ message, onReplySelect, isConsecutive = false }: M
     message.taskData?.assigneeUser ||
     (taskAssignedTo === message.senderId ? message.sender : undefined);
 
-  const resolvedTask = storeTask || message.taskData || (message.messageType === 'TASK' ? {
-    id: targetTaskId,
-    projectId: message.projectId || 'proj_ai_employee',
+  const rawTaskContentDesc = message.content.includes('\n')
+    ? message.content.replace(/^📋\s*(?:\*\*\[TASK\]\*\*)?:?[^\n]*\n?/i, '').trim()
+    : '';
+
+  const taskDescription =
+    (storeTask?.description && storeTask.description.trim()) ||
+    (message.taskData?.description && message.taskData.description.trim()) ||
+    (taskMeta?.description && taskMeta.description.trim()) ||
+    (rawTaskContentDesc || undefined);
+
+  const taskTitle =
+    (storeTask?.title && storeTask.title.trim()) ||
+    (message.taskData?.title && message.taskData.title.trim()) ||
+    (taskMeta?.title && taskMeta.title.trim()) ||
+    message.content.replace(/^📋\s*(?:\*\*\[TASK\]\*\*)?:?\s*/i, '').split('\n')[0].slice(0, 80).trim() ||
+    'Task';
+
+  const resolvedTask: Task | null = (storeTask || message.taskData || message.messageType === 'TASK') ? {
+    id: storeTask?.id || message.taskData?.id || taskMeta?.taskId || `task_${message.id}`,
+    projectId: storeTask?.projectId || message.taskData?.projectId || message.projectId || 'proj_ai_employee',
     messageId: message.id,
-    title: taskMeta?.title || message.content.replace(/^📋\s*(?:\*\*\[TASK\]\*\*)?:?\s*/i, '').slice(0, 80) || 'Task',
-    description: taskMeta?.description || message.content,
-    priority: taskMeta?.priority || 'MEDIUM',
-    status: taskMeta?.status || 'TODO',
-    assignedTo: taskAssignedTo || message.senderId,
+    title: taskTitle,
+    description: taskDescription,
+    priority: storeTask?.priority || message.taskData?.priority || taskMeta?.priority || 'MEDIUM',
+    status: storeTask?.status || message.taskData?.status || taskMeta?.status || 'TODO',
+    assignedTo: taskAssignedTo,
     assigneeUser: taskAssigneeUser,
-    createdBy: message.senderId,
-    dueDate: taskMeta?.dueDate || 'Today',
-    createdAt: message.createdAt,
-  } : null);
+    createdBy: storeTask?.createdBy || message.taskData?.createdBy || message.senderId,
+    dueDate: storeTask?.dueDate || message.taskData?.dueDate || taskMeta?.dueDate || 'Today',
+    createdAt: storeTask?.createdAt || message.taskData?.createdAt || message.createdAt,
+  } : null;
+
+  const isMe = currentUser?.id ? message.senderId === currentUser.id : false;
+  const isSending = message.status === 'sending';
+
+  // Sanitize sender name to completely prevent stale socket fallbacks like "Samir Patra"
+  const senderDisplayName = isMe
+    ? currentUser?.name || 'You'
+    : (message.sender?.name &&
+       message.sender.name !== 'Samir Patra' &&
+       message.sender.name !== 'Debmalya Sen'
+        ? message.sender.name
+        : (users.find((u) => u.id === message.senderId)?.name || 'Developer'));
 
   return (
     <div
@@ -197,9 +241,9 @@ export function MessageItem({ message, onReplySelect, isConsecutive = false }: M
       {/* Sender Avatar (hidden on consecutive grouped messages from same sender) */}
       {!isConsecutive ? (
         <Avatar
-          name={message.sender?.name || 'Developer'}
-          avatarUrl={message.sender?.avatarUrl}
-          status={message.sender?.status}
+          name={senderDisplayName}
+          avatarUrl={message.sender?.avatarUrl || (isMe ? currentUser?.avatarUrl : undefined)}
+          status={message.sender?.status || (isMe ? currentUser?.status : undefined)}
           size="md"
           className="mt-0.5"
         />
@@ -238,7 +282,7 @@ export function MessageItem({ message, onReplySelect, isConsecutive = false }: M
         {!isConsecutive && (
           <div className="flex items-center gap-2 mb-1">
             <span className="text-xs font-semibold text-white tracking-tight">
-              {message.sender?.name || 'Developer'}
+              {senderDisplayName}
             </span>
 
             {isMe && (
@@ -309,11 +353,11 @@ export function MessageItem({ message, onReplySelect, isConsecutive = false }: M
               </div>
             ) : message.messageType === 'BUG' && resolvedBug ? (
               <div className="my-1.5">
-                <BugCard bug={resolvedBug} />
+                <BugCard bug={resolvedBug} isSending={message.status === 'sending'} />
               </div>
             ) : message.messageType === 'TASK' && resolvedTask ? (
               <div className="my-1.5">
-                <TaskCard task={resolvedTask} />
+                <TaskCard task={resolvedTask} isSending={message.status === 'sending'} />
               </div>
             ) : (message.messageType === 'FILE' || message.messageType === 'IMAGE' || message.attachmentData) && message.attachmentData ? (
               <div className="my-1.5 space-y-1.5">
