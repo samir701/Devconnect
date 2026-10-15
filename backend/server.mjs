@@ -317,6 +317,15 @@ function persistMessageToLocalStore(msg) {
 
     io.to(roomName).emit('new_message', createdMessage);
 
+    // If direct message, also deliver to participants' personal channels for instant reception
+    const convId = payload.conversationId || createdMessage.conversationId;
+    if (convId) {
+      const pIds = convId.replace('dm_', '').split('_');
+      for (const pId of pIds) {
+        io.to(`user:${pId}`).emit('new_message', createdMessage);
+      }
+    }
+
     // If message is a TASK or BUG, automatically also group and deliver it to the project's #tasks or #bugs channel room
     const targetProjectId = payload.projectId || createdMessage.projectId;
     const msgType = payload.messageType || createdMessage.messageType;
@@ -600,17 +609,20 @@ function persistMessageToLocalStore(msg) {
   // F. Media State Toggle (Mute / Video / Screen Share status sync)
   socket.on('webrtc_media_toggle', (payload) => {
     const { roomId, isMuted, isVideoOff, isScreenSharing } = payload || {};
-    if (roomId && activeCallRooms.has(roomId)) {
-      const room = activeCallRooms.get(roomId);
-      if (room.has(socket.id)) {
-        const participant = room.get(socket.id);
-        if (isMuted !== undefined) participant.isMuted = isMuted;
-        if (isVideoOff !== undefined) participant.isVideo = !isVideoOff;
-        if (isScreenSharing !== undefined) participant.isScreenSharing = isScreenSharing;
+    if (roomId) {
+      if (activeCallRooms.has(roomId)) {
+        const room = activeCallRooms.get(roomId);
+        if (room && room.has(socket.id)) {
+          const participant = room.get(socket.id);
+          if (isMuted !== undefined) participant.isMuted = isMuted;
+          if (isVideoOff !== undefined) participant.isVideo = !isVideoOff;
+          if (isScreenSharing !== undefined) participant.isScreenSharing = isScreenSharing;
+        }
       }
       socket.to(`call:${roomId}`).emit('webrtc_peer_media_toggled', {
         socketId: socket.id,
         userId,
+        roomId,
         isMuted,
         isVideoOff,
         isScreenSharing,

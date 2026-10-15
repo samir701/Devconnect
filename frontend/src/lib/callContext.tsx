@@ -321,11 +321,30 @@ export function CallProvider({ children }: { children: React.ReactNode }) {
     pc.ontrack = (event) => {
       const [remoteStream] = event.streams;
       if (remoteStream) {
+        if (event.track.kind === 'video') {
+          event.track.onmute = () => {
+            setParticipants((prev) =>
+              prev.map((p) => (p.socketId === targetSocketId ? { ...p, isVideo: false } : p))
+            );
+          };
+          event.track.onunmute = () => {
+            setParticipants((prev) =>
+              prev.map((p) => (p.socketId === targetSocketId ? { ...p, isVideo: true } : p))
+            );
+          };
+        }
+
         setParticipants((prev) => {
           const existing = prev.find((p) => p.socketId === targetSocketId);
           if (existing) {
             return prev.map((p) =>
-              p.socketId === targetSocketId ? { ...p, stream: remoteStream } : p
+              p.socketId === targetSocketId
+                ? {
+                    ...p,
+                    stream: remoteStream,
+                    isVideo: event.track.kind === 'video' ? !event.track.muted : p.isVideo,
+                  }
+                : p
             );
           }
           return [
@@ -335,7 +354,7 @@ export function CallProvider({ children }: { children: React.ReactNode }) {
               userId: peerUser?.id || '',
               user: peerUser,
               stream: remoteStream,
-              isVideo: true,
+              isVideo: event.track.kind === 'video' ? !event.track.muted : true,
               isMuted: false,
             },
           ];
@@ -383,31 +402,43 @@ export function CallProvider({ children }: { children: React.ReactNode }) {
           noiseSuppression: true,
           autoGainControl: true,
         },
-        video: videoRequired
-          ? {
-              width: { ideal: 1280 },
-              height: { ideal: 720 },
-              facingMode: 'user',
-            }
-          : false,
+        video: {
+          width: { ideal: 1280 },
+          height: { ideal: 720 },
+          facingMode: 'user',
+        },
       });
+
+      // If call is started as audio-only, keep camera track attached to avoid renegotiation, but disable transmission
+      if (!videoRequired) {
+        stream.getVideoTracks().forEach((t) => (t.enabled = false));
+      }
+
       localStreamRef.current = stream;
       setLocalStream(stream);
       setIsMuted(false);
       setIsVideoOff(!videoRequired);
       return stream;
     } catch (err) {
-      console.warn('Could not access requested media devices, falling back to audio-only:', err);
-      // Fallback to audio only if camera is unavailable or denied
-      const stream = await navigator.mediaDevices.getUserMedia({
-        audio: true,
-        video: false,
-      });
-      localStreamRef.current = stream;
-      setLocalStream(stream);
-      setIsMuted(false);
-      setIsVideoOff(true);
-      return stream;
+      console.warn('Camera not available or denied, falling back to audio-only:', err);
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({
+          audio: {
+            echoCancellation: true,
+            noiseSuppression: true,
+            autoGainControl: true,
+          },
+          video: false,
+        });
+        localStreamRef.current = stream;
+        setLocalStream(stream);
+        setIsMuted(false);
+        setIsVideoOff(true);
+        return stream;
+      } catch (err2) {
+        console.error('Failed to get any audio or video stream:', err2);
+        throw err2;
+      }
     }
   };
 
@@ -587,44 +618,55 @@ export function CallProvider({ children }: { children: React.ReactNode }) {
   // Controls: Video On/Off
   const toggleVideo = async () => {
     if (localStreamRef.current) {
-      const videoTracks = localStreamRef.current.getVideoTracks();
-      if (videoTracks.length > 0) {
-        const newVideoOff = !isVideoOff;
-        videoTracks.forEach((t) => (t.enabled = !newVideoOff));
-        setIsVideoOff(newVideoOff);
+      let videoTrack = localStreamRef.current.getVideoTracks()[0];
+      const newVideoOff = !isVideoOff;
 
-        if (roomIdRef.current && socketRef.current) {
-          socketRef.current.emit('webrtc_media_toggle', {
-            roomId: roomIdRef.current,
-            isVideoOff: newVideoOff,
-          });
-        }
-      } else {
-        // If camera track doesn't exist yet, request one
+      if (!videoTrack && !newVideoOff) {
+        // Camera track doesn't exist yet: request camera access
         try {
           const videoStream = await navigator.mediaDevices.getUserMedia({
-            video: { width: { ideal: 1280 }, height: { ideal: 720 } },
+            video: { width: { ideal: 1280 }, height: { ideal: 720 }, facingMode: 'user' },
           });
-          const newTrack = videoStream.getVideoTracks()[0];
-          localStreamRef.current.addTrack(newTrack);
+          videoTrack = videoStream.getVideoTracks()[0];
+          localStreamRef.current.addTrack(videoTrack);
 
-          // Add to all peer connections
-          peerConnectionsRef.current.forEach((pc) => {
-            pc.addTrack(newTrack, localStreamRef.current!);
-          });
-
-          setLocalStream(new MediaStream(localStreamRef.current.getTracks()));
-          setIsVideoOff(false);
-
-          if (roomIdRef.current && socketRef.current) {
-            socketRef.current.emit('webrtc_media_toggle', {
-              roomId: roomIdRef.current,
-              isVideoOff: false,
-            });
+          // Update tracks in all active peer connections
+          for (const [targetSocketId, pc] of peerConnectionsRef.current.entries()) {
+            const sender = pc.getSenders().find((s) => s.track?.kind === 'video');
+            if (sender) {
+              await sender.replaceTrack(videoTrack);
+            } else {
+              pc.addTrack(videoTrack, localStreamRef.current!);
+              // Renegotiate with peer so they receive the new video media stream
+              try {
+                const offer = await pc.createOffer();
+                await pc.setLocalDescription(offer);
+                socketRef.current?.emit('webrtc_signal', {
+                  toSocketId: targetSocketId,
+                  signal: offer,
+                  fromUser: currentUser,
+                });
+              } catch (negErr) {
+                console.warn('Renegotiation error on camera add:', negErr);
+              }
+            }
           }
         } catch (err) {
           console.warn('Could not activate camera:', err);
+          return;
         }
+      } else if (videoTrack) {
+        videoTrack.enabled = !newVideoOff;
+      }
+
+      setIsVideoOff(newVideoOff);
+      setLocalStream(new MediaStream(localStreamRef.current.getTracks()));
+
+      if (roomIdRef.current && socketRef.current) {
+        socketRef.current.emit('webrtc_media_toggle', {
+          roomId: roomIdRef.current,
+          isVideoOff: newVideoOff,
+        });
       }
     }
   };

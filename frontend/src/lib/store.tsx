@@ -231,6 +231,16 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     activeChannelRef.current = activeChannel;
   }, [activeChannel]);
 
+  const currentUserRef = useRef(currentUser);
+  useEffect(() => {
+    currentUserRef.current = currentUser;
+  }, [currentUser]);
+
+  const usersRef = useRef(users);
+  useEffect(() => {
+    usersRef.current = users;
+  }, [users]);
+
   // Modals
   const [isSearchOpen, setIsSearchOpen] = useState(false);
   const [isCreateBugOpen, setIsCreateBugOpen] = useState(false);
@@ -717,6 +727,64 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
 
     // 1. Realtime New Message received from another tab or user
     socket.on('new_message', (newMsg: Message) => {
+      // If direct conversation message, reorder conversations to the top & create in-app notification
+      if (newMsg.conversationId) {
+        setConversations((prev) => {
+          const normTarget = newMsg.conversationId?.replace('dm_', '').split('_').sort().join('_');
+          const matchIndex = prev.findIndex(
+            (c) =>
+              c.id === newMsg.conversationId ||
+              c.id.replace('dm_', '').split('_').sort().join('_') === normTarget
+          );
+
+          if (matchIndex >= 0) {
+            const matched = prev[matchIndex];
+            const isCurrentActive =
+              activeConversationRef.current?.id === matched.id ||
+              activeConversationRef.current?.id.replace('dm_', '').split('_').sort().join('_') === normTarget;
+
+            const updated: DirectConversation = {
+              ...matched,
+              lastMessage: newMsg.content || 'Sent an attachment',
+              lastActivity: newMsg.createdAt || new Date().toISOString(),
+              unreadCount: isCurrentActive ? 0 : (matched.unreadCount || 0) + 1,
+            };
+            const remaining = prev.filter((_, idx) => idx !== matchIndex);
+            return [updated, ...remaining];
+          } else {
+            // New conversation appeared: refresh base conversations
+            refreshData(true);
+            return prev;
+          }
+        });
+
+        // If message is from someone else and user is not looking at this conversation, show notification
+        const isFromOther = newMsg.senderId !== currentUserRef.current?.id;
+        const normTarget = newMsg.conversationId?.replace('dm_', '').split('_').sort().join('_');
+        const isLookingAtConv =
+          activeConversationRef.current?.id === newMsg.conversationId ||
+          activeConversationRef.current?.id.replace('dm_', '').split('_').sort().join('_') === normTarget;
+
+        if (isFromOther && !isLookingAtConv) {
+          const senderUser = usersRef.current.find((u) => u.id === newMsg.senderId);
+          const newNotif: AppNotification = {
+            id: `notif_${Date.now()}_${newMsg.id}`,
+            recipientId: currentUserRef.current?.id || '',
+            senderId: newMsg.senderId,
+            type: 'DIRECT_MESSAGE',
+            priority: 'NORMAL',
+            title: `New message from ${newMsg.sender?.name || senderUser?.name || 'Developer'}`,
+            message: (newMsg.content || 'Sent an attachment').slice(0, 120),
+            read: false,
+            createdAt: new Date().toISOString(),
+            entityId: newMsg.id,
+            entityType: 'MESSAGE',
+          };
+          setNotifications((prev) => [newNotif, ...prev]);
+          setUnreadCount((prev) => prev + 1);
+        }
+      }
+
       setMessages((prev) => {
         if (prev.some((m) => m.id === newMsg.id)) return prev;
         if (doesMessageMatchView(newMsg, activeConversationRef.current, activeProjectIdRef.current, activeChannelRef.current)) {
@@ -1102,6 +1170,29 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
           }
           return prev;
         });
+
+        // Reorder conversations immediately to bring active conversation to the top
+        if (activeConversation) {
+          setConversations((prev) => {
+            const normTarget = activeConversation.id.replace('dm_', '').split('_').sort().join('_');
+            const matchIndex = prev.findIndex(
+              (c) =>
+                c.id === activeConversation.id ||
+                c.id.replace('dm_', '').split('_').sort().join('_') === normTarget
+            );
+            if (matchIndex >= 0) {
+              const matched: DirectConversation = {
+                ...prev[matchIndex],
+                lastMessage: createdMsg.content || 'Sent an attachment',
+                lastActivity: createdMsg.createdAt || new Date().toISOString(),
+                unreadCount: 0,
+              };
+              const remaining = prev.filter((_, idx) => idx !== matchIndex);
+              return [matched, ...remaining];
+            }
+            return prev;
+          });
+        }
 
         // Broadcast to all other windows/tabs in the room via socket
         if (socket && socket.connected) {

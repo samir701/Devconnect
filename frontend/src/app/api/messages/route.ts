@@ -12,6 +12,7 @@ import { prisma } from '@/lib/prisma';
 import { createNotification, getUserNotificationPreferences } from '@/lib/notifications';
 import { sendMentionEmail } from '@/lib/email/notifications';
 import { getSessionUserId } from '@/lib/auth-guard';
+import { emitRealtimeEvent } from '@/lib/activity';
 
 
 export async function GET(request: Request) {
@@ -116,6 +117,47 @@ export async function POST(request: Request) {
           storageKey: attachmentData.storageKey || `project-files/${body.projectId}/${attachmentData.fileName}`,
           fileUrl: attachmentData.fileUrl,
         });
+      }
+    }
+
+    // ── Phase 6: Direct Message Notifications ─────────────────────────────────
+    if (body.conversationId && senderId) {
+      try {
+        const parts = body.conversationId.replace('dm_', '').split('_');
+        const recipientId = parts.find((p: string) => p !== senderId);
+
+        if (recipientId) {
+          const senderUser = await prisma.user.findUnique({
+            where: { id: senderId },
+            select: { name: true },
+          });
+          const senderName = senderUser?.name || 'Developer';
+
+          const notif = await createNotification({
+            recipientId,
+            senderId,
+            type: 'DIRECT_MESSAGE',
+            priority: 'NORMAL',
+            title: `New message from ${senderName}`,
+            message: body.content ? body.content.slice(0, 150) : 'Sent an attachment',
+            entityId: message.id,
+            entityType: 'MESSAGE',
+          });
+
+          // Dispatch realtime notification & direct message to recipient
+          emitRealtimeEvent('new_notification', {
+            userId: recipientId,
+            notification: notif,
+          }).catch(() => {});
+
+          emitRealtimeEvent('new_message', {
+            ...message,
+            conversationId: body.conversationId,
+            recipientId,
+          }).catch(() => {});
+        }
+      } catch (dmNotifErr) {
+        console.error('[Messages] Direct message notification error (non-fatal):', dmNotifErr);
       }
     }
 

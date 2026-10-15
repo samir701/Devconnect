@@ -41,12 +41,17 @@ function ParticipantTile({
     }
   }, [participant.stream]);
 
-  const hasVideoTrack =
-    participant.stream &&
-    participant.stream.getVideoTracks().length > 0 &&
-    participant.stream.getVideoTracks().some((t) => t.enabled && t.readyState === 'live');
+  const liveVideoTracks =
+    participant.stream
+      ? participant.stream.getVideoTracks().filter((t) => t.readyState !== 'ended')
+      : [];
 
-  const showVideo = !participant.isVideo === false && hasVideoTrack;
+  // If local participant, check whether video track is enabled
+  // If remote participant, display video unless participant explicitly turned it off (isVideo === false)
+  const isExplicitlyOff = participant.isVideo === false;
+  const showVideo = isLocal
+    ? !isExplicitlyOff && liveVideoTracks.some((t) => t.enabled)
+    : !isExplicitlyOff && liveVideoTracks.length > 0;
 
   return (
     <div className="relative w-full h-full rounded-2xl overflow-hidden bg-[#0d121f] border border-white/10 flex items-center justify-center group shadow-lg">

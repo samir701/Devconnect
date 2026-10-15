@@ -70,13 +70,24 @@ try {
 
 // ================= LOCAL DISK PERSISTENCE LAYER =================
 function getStoreFilePath(): string {
-  let dir = path.resolve(process.cwd(), '.devconnect-data');
-  if (path.basename(process.cwd()).toLowerCase() === 'frontend') {
+  const isServerless = Boolean(
+    process.env.VERCEL ||
+    process.env.AWS_LAMBDA_FUNCTION_NAME ||
+    process.env.NODE_ENV === 'production' ||
+    (typeof process.cwd === 'function' && process.cwd().startsWith('/var/task'))
+  );
+
+  let dir = isServerless
+    ? path.join('/tmp', '.devconnect-data')
+    : path.resolve(process.cwd(), '.devconnect-data');
+
+  if (!isServerless && path.basename(process.cwd()).toLowerCase() === 'frontend') {
     dir = path.resolve(process.cwd(), '../.devconnect-data');
   }
+
   try {
-    if (!fs.existsSync(dir)) {
-      fs.mkdirSync(dir, { recursive: true });
+    if (!fs.existsSync(/*turbopackIgnore: true*/ dir)) {
+      fs.mkdirSync(/*turbopackIgnore: true*/ dir, { recursive: true });
     }
   } catch {}
   return path.join(dir, 'local-store.json');
@@ -98,21 +109,23 @@ interface PersistentStoreData {
 
 export function loadPersistedStore(): Partial<PersistentStoreData> | null {
   try {
-    if (fs.existsSync(STORE_FILE_PATH)) {
-      const raw = fs.readFileSync(STORE_FILE_PATH, 'utf-8');
+    if (fs.existsSync(/*turbopackIgnore: true*/ STORE_FILE_PATH)) {
+      const raw = fs.readFileSync(/*turbopackIgnore: true*/ STORE_FILE_PATH, 'utf-8');
       if (raw && raw.trim()) {
         return JSON.parse(raw);
       }
     }
-  } catch (err) {
-    console.error('[Store] Error reading persistent store from disk:', err);
-  }
+  } catch {}
   return null;
 }
 
 export function saveStoreToDisk() {
   if (!globalThis.__devconnect_store) return;
   try {
+    const dir = path.dirname(STORE_FILE_PATH);
+    if (!fs.existsSync(/*turbopackIgnore: true*/ dir)) {
+      fs.mkdirSync(/*turbopackIgnore: true*/ dir, { recursive: true });
+    }
     const data: PersistentStoreData = {
       messages: globalThis.__devconnect_store.messages,
       tasks: Array.from(globalThis.__devconnect_store.tasks.values()),
@@ -126,14 +139,14 @@ export function saveStoreToDisk() {
     };
     const json = JSON.stringify(data, null, 2);
     const tmp = STORE_FILE_PATH + '.tmp';
-    fs.writeFileSync(tmp, json, 'utf-8');
+    fs.writeFileSync(/*turbopackIgnore: true*/ tmp, json, 'utf-8');
     try {
-      fs.renameSync(tmp, STORE_FILE_PATH);
+      fs.renameSync(/*turbopackIgnore: true*/ tmp, STORE_FILE_PATH);
     } catch {
-      fs.writeFileSync(STORE_FILE_PATH, json, 'utf-8');
+      fs.writeFileSync(/*turbopackIgnore: true*/ STORE_FILE_PATH, json, 'utf-8');
     }
-  } catch (err) {
-    console.error('[Store] Error writing store to disk:', err);
+  } catch {
+    // Primary persistence in production is TiDB Cloud; safely ignore ephemeral disk write errors
   }
 }
 
@@ -2034,13 +2047,20 @@ export async function getActivity(projectId: string): Promise<ActivityLog[]> {
 
 // ================= CONVERSATIONS (1-TO-1) =================
 export async function getConversations(userId: string): Promise<DirectConversation[]> {
-  const otherUsers = Array.from(store.users.values()).filter(
+  const allUsers = await getUsers();
+  const otherUsers = allUsers.filter(
     (u) => u.id !== userId && !u.email.endsWith('@test.dev') && !u.email.endsWith('@example.com')
   );
-  return otherUsers.map((other) => {
+
+  const convList = otherUsers.map((other) => {
     // Look up recent message between users
     const conversationId = [userId, other.id].sort().join('_');
-    const recentMessages = store.messages.filter((m) => m.conversationId === conversationId || m.conversationId === `dm_${userId}_${other.id}` || m.conversationId === `dm_${other.id}_${userId}`);
+    const recentMessages = store.messages.filter(
+      (m) =>
+        m.conversationId === conversationId ||
+        m.conversationId === `dm_${userId}_${other.id}` ||
+        m.conversationId === `dm_${other.id}_${userId}`
+    );
     const lastMsg = recentMessages[recentMessages.length - 1];
 
     return {
@@ -2052,6 +2072,21 @@ export async function getConversations(userId: string): Promise<DirectConversati
       unreadCount: 0,
     };
   });
+
+  // Sort conversations: most recent message/activity moves to the TOP
+  convList.sort((a, b) => {
+    const timeA =
+      a.lastActivity && a.lastActivity !== 'Recently' && a.lastActivity !== 'Just now'
+        ? new Date(a.lastActivity).getTime()
+        : 0;
+    const timeB =
+      b.lastActivity && b.lastActivity !== 'Recently' && b.lastActivity !== 'Just now'
+        ? new Date(b.lastActivity).getTime()
+        : 0;
+    return timeB - timeA;
+  });
+
+  return convList;
 }
 
 // ================= GLOBAL SEARCH =================
