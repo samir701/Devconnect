@@ -20,6 +20,7 @@ import { CallProvider } from '@/lib/callContext';
 import { IncomingCallModal } from '@/components/call/IncomingCallModal';
 import { ActiveCallModal } from '@/components/call/ActiveCallModal';
 import { FloatingCallWidget } from '@/components/call/FloatingCallWidget';
+import { NotificationToastContainer } from '@/components/ui/NotificationToast';
 import { useAppStore } from '@/lib/store';
 
 function WorkspaceMain() {
@@ -72,6 +73,9 @@ function WorkspaceMain() {
       <IncomingCallModal />
       <ActiveCallModal />
       <FloatingCallWidget />
+
+      {/* Floating Realtime Notification Toasts */}
+      <NotificationToastContainer />
     </div>
   );
 }

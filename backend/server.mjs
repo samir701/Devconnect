@@ -217,6 +217,9 @@ io.on('connection', (socket) => {
     const roomName = getRoomName(payload);
     if (!roomName) return;
     socket.join(roomName);
+    if (payload.projectId) {
+      socket.join(`project:${payload.projectId}`);
+    }
     socket.emit('joined_conversation', { roomName, ...payload });
   });
 
@@ -326,10 +329,11 @@ function persistMessageToLocalStore(msg) {
       }
     }
 
-    // If message is a TASK or BUG, automatically also group and deliver it to the project's #tasks or #bugs channel room
+    // If message is for a project, also deliver to the project room so all active project members get the realtime update
     const targetProjectId = payload.projectId || createdMessage.projectId;
     const msgType = payload.messageType || createdMessage.messageType;
     if (targetProjectId) {
+      io.to(`project:${targetProjectId}`).emit('new_message', createdMessage);
       if (msgType === 'TASK') {
         io.to(`channel:${targetProjectId}:tasks`).emit('new_message', createdMessage);
       } else if (msgType === 'BUG') {

@@ -307,7 +307,13 @@ export function Sidebar() {
                           </div>
                         )}
 
-                        {other?.status === 'ONLINE' && (
+                        {Boolean(conv.unreadCount && conv.unreadCount > 0 && !isSelected) && (
+                          <span className="min-w-[18px] h-[18px] px-1 text-[10px] font-bold bg-cyan-500 text-slate-950 rounded-full flex items-center justify-center shrink-0 shadow-sm shadow-cyan-500/30">
+                            {conv.unreadCount! > 9 ? '9+' : conv.unreadCount}
+                          </span>
+                        )}
+
+                        {other?.status === 'ONLINE' && (!conv.unreadCount || isSelected) && (
                           <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 shrink-0 group-hover:hidden" />
                         )}
                       </div>

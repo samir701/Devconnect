@@ -161,6 +161,52 @@ export async function POST(request: Request) {
       }
     }
 
+    // ── Phase 6: Project / Channel Notifications for Team Members ───────────
+    if (body.projectId && senderId) {
+      try {
+        const project = await prisma.project.findUnique({
+          where: { id: body.projectId },
+          include: {
+            members: {
+              where: { userId: { not: senderId } },
+              select: { userId: true },
+            },
+          },
+        });
+
+        if (project && project.members.length > 0) {
+          const senderUser = await prisma.user.findUnique({
+            where: { id: senderId },
+            select: { name: true },
+          });
+          const senderName = senderUser?.name || 'Developer';
+          const channelName = body.channel || 'general';
+
+          for (const member of project.members) {
+            const notif = await createNotification({
+              recipientId: member.userId,
+              senderId,
+              projectId: body.projectId,
+              type: 'REPLY',
+              priority: 'NORMAL',
+              title: `#${channelName} • ${senderName}`,
+              message: body.content ? body.content.slice(0, 150) : 'Sent an attachment',
+              entityId: message.id,
+              entityType: 'MESSAGE',
+            });
+
+            // Deliver notification to member's personal socket room
+            emitRealtimeEvent('new_notification', {
+              userId: member.userId,
+              notification: notif,
+            }).catch(() => {});
+          }
+        }
+      } catch (projNotifErr) {
+        console.error('[Messages] Project notification error (non-fatal):', projNotifErr);
+      }
+    }
+
     // ── Phase 6: Parse @mentions and dispatch MENTION notifications ───────────
     if (body.projectId && body.senderId && body.content) {
       try {

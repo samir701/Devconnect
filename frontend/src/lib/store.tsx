@@ -3,6 +3,7 @@
 import React, { createContext, useContext, useState, useEffect, useCallback, useRef } from 'react';
 import confetti from 'canvas-confetti';
 import { io, Socket } from 'socket.io-client';
+import { callAudio } from './callAudio';
 import {
   User,
   Project,
@@ -22,6 +23,23 @@ import {
   AppNotification,
   NotificationPreferences,
 } from './types';
+
+export interface ToastNotification {
+  id: string;
+  title: string;
+  message: string;
+  type: 'DIRECT_MESSAGE' | 'GROUP_MESSAGE' | 'MENTION' | 'SYSTEM';
+  sender?: {
+    id?: string;
+    name: string;
+    avatarUrl?: string;
+  };
+  projectId?: string;
+  channel?: string;
+  conversationId?: string;
+  conversation?: DirectConversation;
+  createdAt: string;
+}
 
 interface AppContextType {
   currentUser: User | null;
@@ -139,6 +157,10 @@ interface AppContextType {
   saveNotifPreferences: (prefs: Partial<NotificationPreferences>) => Promise<void>;
   isNotifSettingsOpen: boolean;
   setIsNotifSettingsOpen: (open: boolean) => void;
+  // Realtime Notification Toasts
+  toasts: ToastNotification[];
+  dismissToast: (id: string) => void;
+  triggerToast: (toast: Omit<ToastNotification, 'id' | 'createdAt'>) => void;
 }
 
 const AppContext = createContext<AppContextType | null>(null);
@@ -183,15 +205,25 @@ const doesMessageMatchView = (
   currentProjId: string | null,
   currentChannel: string
 ): boolean => {
+  // 1. Direct Conversation View: ONLY match messages for THIS direct conversation
   if (currentConv) {
+    if (!msg.conversationId) return false;
     if (msg.conversationId === currentConv.id) return true;
     const partsTarget = currentConv.id.replace('dm_', '').split('_').sort().join('_');
     const partsMsg = (msg.conversationId || '').replace('dm_', '').split('_').sort().join('_');
     return partsTarget.length > 0 && partsTarget === partsMsg;
   }
+
+  // 2. Project Channel View: direct messages MUST NOT appear in project channels!
+  if (msg.conversationId) {
+    return false;
+  }
+
+  // Ensure message belongs to the current active project
   if (currentProjId && msg.projectId && msg.projectId !== currentProjId) {
     return false;
   }
+
   if (msg.channel === currentChannel) return true;
   if (currentChannel === 'tasks' && (msg.messageType === 'TASK' || msg.taskData)) return true;
   if (currentChannel === 'bugs' && (msg.messageType === 'BUG' || msg.bugData)) return true;
@@ -202,10 +234,19 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   const [currentUser, setCurrentUser] = useState<User | null>(null);
   const [users, setUsers] = useState<User[]>([]);
   const [projects, setProjects] = useState<Project[]>([]);
-  const [activeProjectId, setActiveProjectId] = useState<string | null>('proj_ai_employee');
+  const [activeProjectId, setActiveProjectId] = useState<string | null>(() => {
+    if (typeof window !== 'undefined') {
+      if (localStorage.getItem('devconnect_active_conv_id')) {
+        return null;
+      }
+      return localStorage.getItem('devconnect_active_project') || 'proj_ai_employee';
+    }
+    return 'proj_ai_employee';
+  });
   const [activeChannel, setActiveChannel] = useState<string>('general');
   const [activeConversation, setActiveConversation] = useState<DirectConversation | null>(null);
   const [conversations, setConversations] = useState<DirectConversation[]>([]);
+  const [toasts, setToasts] = useState<ToastNotification[]>([]);
   const [messages, setMessages] = useState<Message[]>([]);
   const [tasks, setTasks] = useState<Task[]>([]);
   const [bugs, setBugs] = useState<Bug[]>([]);
@@ -230,6 +271,33 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   useEffect(() => {
     activeChannelRef.current = activeChannel;
   }, [activeChannel]);
+
+  const projectsRef = useRef(projects);
+  useEffect(() => {
+    projectsRef.current = projects;
+  }, [projects]);
+
+  const dismissToast = useCallback((id: string) => {
+    setToasts((prev) => prev.filter((t) => t.id !== id));
+  }, []);
+
+  const triggerToast = useCallback(
+    (toastData: Omit<ToastNotification, 'id' | 'createdAt'>) => {
+      const id = `toast_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`;
+      const newToast: ToastNotification = {
+        ...toastData,
+        id,
+        createdAt: new Date().toISOString(),
+      };
+      setToasts((prev) => [newToast, ...prev.slice(0, 4)]);
+      callAudio.playNotificationChime();
+
+      setTimeout(() => {
+        dismissToast(id);
+      }, 6000);
+    },
+    [dismissToast]
+  );
 
   const currentUserRef = useRef(currentUser);
   useEffect(() => {
@@ -370,22 +438,39 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
             return !email.endsWith('@test.dev') && !email.endsWith('@example.com') && !email.includes('test_');
           });
           setConversations((prev) => {
-            if (prev.length === convList.length) {
-              let same = true;
-              for (let i = 0; i < prev.length; i++) {
-                if (
-                  prev[i].id !== convList[i].id ||
-                  prev[i].unreadCount !== convList[i].unreadCount ||
-                  prev[i].otherUser?.status !== convList[i].otherUser?.status ||
-                  prev[i].lastMessage !== convList[i].lastMessage
-                ) {
-                  same = false;
-                  break;
+            // Merge convList with prev to preserve client-side unread counts and any newer client-side activity
+            const merged = convList.map((c) => {
+              const existing = prev.find((p) => p.id === c.id);
+              if (existing) {
+                const existingTime = existing.lastActivity && existing.lastActivity !== 'Recently' ? new Date(existing.lastActivity).getTime() : 0;
+                const serverTime = c.lastActivity && c.lastActivity !== 'Recently' ? new Date(c.lastActivity).getTime() : 0;
+                if (existingTime > serverTime) {
+                  return {
+                    ...c,
+                    lastMessage: existing.lastMessage,
+                    lastActivity: existing.lastActivity,
+                    unreadCount: existing.unreadCount !== undefined ? existing.unreadCount : c.unreadCount || 0,
+                  };
                 }
+                return {
+                  ...c,
+                  unreadCount: existing.unreadCount !== undefined ? existing.unreadCount : c.unreadCount,
+                };
               }
-              if (same) return prev;
-            }
-            return convList;
+              return c;
+            });
+
+            // Re-sort merged so newest activity is always on top
+            merged.sort((a, b) => {
+              const timeA = a.lastActivity && a.lastActivity !== 'Recently' ? new Date(a.lastActivity).getTime() : 0;
+              const timeB = b.lastActivity && b.lastActivity !== 'Recently' ? new Date(b.lastActivity).getTime() : 0;
+              if (timeA > 0 && timeB > 0) return timeB - timeA;
+              if (timeA > 0) return -1;
+              if (timeB > 0) return 1;
+              return (a.otherUser?.name || '').localeCompare(b.otherUser?.name || '');
+            });
+
+            return merged;
           });
 
           // Auto-restore active conversation if previously selected on initial mount
@@ -628,20 +713,25 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
 
   // Safely restore persisted view & cached messages from localStorage on client mount (prevents SSR hydration mismatch)
   useEffect(() => {
-    const savedProj = getStorageItem('devconnect_active_project');
-    if (savedProj) setActiveProjectId(savedProj);
-
-    const savedChan = getStorageItem('devconnect_active_channel');
-    if (savedChan) setActiveChannel(savedChan);
-
     const savedConvId = getStorageItem('devconnect_active_conv_id');
-    const viewKey = savedConvId
-      ? `conv_${savedConvId}`
-      : `proj_${savedProj || 'proj_ai_employee'}_chan_${savedChan || 'general'}`;
+    const savedProj = getStorageItem('devconnect_active_project');
+    const savedChan = getStorageItem('devconnect_active_channel');
 
-    const cached = getCachedMessages(viewKey);
-    if (cached && cached.length > 0) {
-      setMessages(cached);
+    if (savedConvId) {
+      setActiveProjectId(null);
+      const viewKey = `conv_${savedConvId}`;
+      const cached = getCachedMessages(viewKey);
+      if (cached && cached.length > 0) {
+        setMessages(cached);
+      }
+    } else {
+      if (savedProj) setActiveProjectId(savedProj);
+      if (savedChan) setActiveChannel(savedChan);
+      const viewKey = `proj_${savedProj || 'proj_ai_employee'}_chan_${savedChan || 'general'}`;
+      const cached = getCachedMessages(viewKey);
+      if (cached && cached.length > 0) {
+        setMessages(cached);
+      }
     }
   }, []);
 
@@ -727,8 +817,18 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
 
     // 1. Realtime New Message received from another tab or user
     socket.on('new_message', (newMsg: Message) => {
-      // If direct conversation message, reorder conversations to the top & create in-app notification
+      const isFromOther = newMsg.senderId !== currentUserRef.current?.id;
+      const isCurrentlyLooking = doesMessageMatchView(
+        newMsg,
+        activeConversationRef.current,
+        activeProjectIdRef.current,
+        activeChannelRef.current
+      );
+
+      // If direct conversation message, reorder conversations to the top & create notification
       if (newMsg.conversationId) {
+        let updatedConv: DirectConversation | undefined;
+
         setConversations((prev) => {
           const normTarget = newMsg.conversationId?.replace('dm_', '').split('_').sort().join('_');
           const matchIndex = prev.findIndex(
@@ -749,24 +849,35 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
               lastActivity: newMsg.createdAt || new Date().toISOString(),
               unreadCount: isCurrentActive ? 0 : (matched.unreadCount || 0) + 1,
             };
+            updatedConv = updated;
             const remaining = prev.filter((_, idx) => idx !== matchIndex);
             return [updated, ...remaining];
           } else {
-            // New conversation appeared: refresh base conversations
-            refreshData(true);
+            // New conversation appeared: add directly without roundtrip refresh
+            const otherUser =
+              newMsg.sender && newMsg.sender.id !== currentUserRef.current?.id
+                ? newMsg.sender
+                : usersRef.current.find((u) => u.id === newMsg.senderId);
+
+            if (otherUser) {
+              const updated: DirectConversation = {
+                id: newMsg.conversationId || `dm_${otherUser.id}`,
+                participantIds: [currentUserRef.current?.id || '', otherUser.id],
+                otherUser,
+                lastMessage: newMsg.content || 'Sent an attachment',
+                lastActivity: newMsg.createdAt || new Date().toISOString(),
+                unreadCount: 1,
+              };
+              updatedConv = updated;
+              return [updated, ...prev];
+            }
             return prev;
           }
         });
 
-        // If message is from someone else and user is not looking at this conversation, show notification
-        const isFromOther = newMsg.senderId !== currentUserRef.current?.id;
-        const normTarget = newMsg.conversationId?.replace('dm_', '').split('_').sort().join('_');
-        const isLookingAtConv =
-          activeConversationRef.current?.id === newMsg.conversationId ||
-          activeConversationRef.current?.id.replace('dm_', '').split('_').sort().join('_') === normTarget;
-
-        if (isFromOther && !isLookingAtConv) {
-          const senderUser = usersRef.current.find((u) => u.id === newMsg.senderId);
+        // If message is from someone else and user is not looking at this conversation, show notification & toast
+        if (isFromOther && !isCurrentlyLooking) {
+          const senderUser = newMsg.sender || usersRef.current.find((u) => u.id === newMsg.senderId);
           const newNotif: AppNotification = {
             id: `notif_${Date.now()}_${newMsg.id}`,
             recipientId: currentUserRef.current?.id || '',
@@ -782,6 +893,47 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
           };
           setNotifications((prev) => [newNotif, ...prev]);
           setUnreadCount((prev) => prev + 1);
+
+          triggerToast({
+            title: `New message from ${newMsg.sender?.name || senderUser?.name || 'Developer'}`,
+            message: (newMsg.content || 'Sent an attachment').slice(0, 120),
+            type: 'DIRECT_MESSAGE',
+            sender: senderUser,
+            conversationId: newMsg.conversationId,
+            conversation: updatedConv,
+          });
+        }
+      } else if (newMsg.projectId) {
+        // Group / Channel message: if from someone else and user is not in this channel, show notification & toast
+        if (isFromOther && !isCurrentlyLooking) {
+          const senderUser = newMsg.sender || usersRef.current.find((u) => u.id === newMsg.senderId);
+          const channelName = newMsg.channel || 'general';
+
+          const newNotif: AppNotification = {
+            id: `notif_${Date.now()}_${newMsg.id}`,
+            recipientId: currentUserRef.current?.id || '',
+            senderId: newMsg.senderId,
+            projectId: newMsg.projectId,
+            type: 'REPLY',
+            priority: 'NORMAL',
+            title: `#${channelName} • ${senderUser?.name || 'Developer'}`,
+            message: (newMsg.content || 'Sent an attachment').slice(0, 120),
+            read: false,
+            createdAt: new Date().toISOString(),
+            entityId: newMsg.id,
+            entityType: 'MESSAGE',
+          };
+          setNotifications((prev) => [newNotif, ...prev]);
+          setUnreadCount((prev) => prev + 1);
+
+          triggerToast({
+            title: `#${channelName} • ${senderUser?.name || 'Developer'}`,
+            message: (newMsg.content || 'Sent an attachment').slice(0, 120),
+            type: 'GROUP_MESSAGE',
+            sender: senderUser,
+            projectId: newMsg.projectId,
+            channel: channelName,
+          });
         }
       }
 
@@ -968,6 +1120,14 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         return [notif, ...prev];
       });
       setUnreadCount((c) => c + 1);
+
+      triggerToast({
+        title: notif.title,
+        message: notif.message,
+        type: notif.type === 'DIRECT_MESSAGE' ? 'DIRECT_MESSAGE' : 'GROUP_MESSAGE',
+        sender: notif.sender,
+        projectId: notif.projectId,
+      });
     });
 
     // 8. Realtime Project/Group Triggers (Group added or removed)
@@ -1109,6 +1269,9 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     setActiveConversation(conv);
     setIsMobileSidebarOpen(false);
     setStorageItem('devconnect_active_conv_id', conv.id);
+    setConversations((prev) =>
+      prev.map((c) => (c.id === conv.id ? { ...c, unreadCount: 0 } : c))
+    );
     const key = `conv_${conv.id}`;
     const cached = getCachedMessages(key);
     if (cached) setMessages(cached);
@@ -1941,6 +2104,10 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         saveNotifPreferences,
         isNotifSettingsOpen,
         setIsNotifSettingsOpen,
+        // Realtime Notification Toasts
+        toasts,
+        dismissToast,
+        triggerToast,
       }}
     >
       {children}
