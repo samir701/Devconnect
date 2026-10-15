@@ -509,7 +509,8 @@ function persistMessageToLocalStore(msg) {
   socket.on('webrtc_call_user', (payload) => {
     // payload: { userToCall, fromUser, isVideo, roomId, callType, title }
     if (!payload?.userToCall) return;
-    io.to(`user:${payload.userToCall}`).emit('webrtc_incoming_call', {
+    // Exclude caller socket to prevent self-rejection when calling own account across tabs
+    socket.to(`user:${payload.userToCall}`).emit('webrtc_incoming_call', {
       callerSocketId: socket.id,
       callerUser: payload.fromUser,
       isVideo: payload.isVideo ?? true,
@@ -522,12 +523,12 @@ function persistMessageToLocalStore(msg) {
   // B. 1-on-1 Call Declined/Busy
   socket.on('webrtc_call_rejected', (payload) => {
     if (payload?.toSocketId) {
-      io.to(payload.toSocketId).emit('webrtc_call_rejected', {
+      socket.to(payload.toSocketId).emit('webrtc_call_rejected', {
         fromUser: payload.fromUser,
         reason: payload.reason || 'declined',
       });
     } else if (payload?.toUserId) {
-      io.to(`user:${payload.toUserId}`).emit('webrtc_call_rejected', {
+      socket.to(`user:${payload.toUserId}`).emit('webrtc_call_rejected', {
         fromUser: payload.fromUser,
         reason: payload.reason || 'declined',
       });
@@ -538,6 +539,13 @@ function persistMessageToLocalStore(msg) {
   socket.on('webrtc_join_room', (payload) => {
     const { roomId, user, isVideo = true, isMuted = false } = payload || {};
     if (!roomId) return;
+
+    // Clean up any other active call room before joining a new one
+    for (const [rId, r] of activeCallRooms.entries()) {
+      if (rId !== roomId && r.has(socket.id)) {
+        leaveCallRoom(socket, rId);
+      }
+    }
 
     socket.join(`call:${roomId}`);
 
