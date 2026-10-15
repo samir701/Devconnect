@@ -700,7 +700,18 @@ export async function getMessages(filters: {
           }
         }
       } else if (filters.conversationId) {
-        whereClause.conversationId = filters.conversationId;
+        const raw = filters.conversationId.replace('dm_', '');
+        const parts = raw.split('_');
+        if (parts.length === 2) {
+          const [u1, u2] = parts;
+          whereClause.OR = [
+            { conversationId: filters.conversationId },
+            { conversationId: `dm_${u1}_${u2}` },
+            { conversationId: `dm_${u2}_${u1}` },
+          ];
+        } else {
+          whereClause.conversationId = filters.conversationId;
+        }
       }
 
       const dbMessages = await prisma.message.findMany({

@@ -1,7 +1,7 @@
 'use client';
 
 import React, { useState, useRef, useEffect } from 'react';
-import { useAppStore } from '@/lib/store';
+import { useAppStore, doesMessageMatchView } from '@/lib/store';
 import { MessageItem } from './MessageItem';
 import { MessageComposer } from './MessageComposer';
 import { Avatar } from '@/components/ui/Avatar';
@@ -26,6 +26,7 @@ import { useCallStore } from '@/lib/callContext';
 
 export function ChatArea() {
   const {
+    activeProjectId,
     activeProject,
     activeChannel,
     activeConversation,
@@ -59,7 +60,12 @@ export function ChatArea() {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages.length]);
 
-  const filteredMessages = messages.filter((m) => {
+  // Isolate active room messages so messages from previous chat or channel NEVER bleed or toggle
+  const currentRoomMessages = messages.filter((m) =>
+    doesMessageMatchView(m, activeConversation, activeProjectId, activeChannel)
+  );
+
+  const filteredMessages = currentRoomMessages.filter((m) => {
     if (!searchFilter.trim()) return true;
     const q = searchFilter.toLowerCase();
     return (

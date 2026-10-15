@@ -199,7 +199,7 @@ const setCachedMessages = (viewKey: string, msgs: Message[]) => {
   } catch {}
 };
 
-const doesMessageMatchView = (
+export const doesMessageMatchView = (
   msg: Message,
   currentConv: DirectConversation | null,
   currentProjId: string | null,
@@ -276,6 +276,8 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   useEffect(() => {
     projectsRef.current = projects;
   }, [projects]);
+
+  const activeViewSeqRef = useRef(0);
 
   const dismissToast = useCallback((id: string) => {
     setToasts((prev) => prev.filter((t) => t.id !== id));
@@ -524,6 +526,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
 
   // Fetch project details when activeProjectId or activeChannel or activeConversation changes
   const fetchActiveDetails = useCallback(async (isBackground = false) => {
+    const currentSeq = ++activeViewSeqRef.current;
     const viewKey = activeConversation
       ? `conv_${activeConversation.id}`
       : `proj_${activeProjectId}_chan_${activeChannel}`;
@@ -540,32 +543,31 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       if (activeConversation) {
         // Fetch 1-to-1 messages
         const res = await fetch(`/api/messages?conversationId=${encodeURIComponent(activeConversation.id)}`);
+        if (currentSeq !== activeViewSeqRef.current) return; // Stale! View switched while fetch was running
+
         if (res.ok) {
           const mData = await res.json();
-          const fetchedMsgs: Message[] = mData.messages || [];
+          if (currentSeq !== activeViewSeqRef.current) return;
+          const fetchedMsgs: Message[] = (mData.messages || []).map((m: Message) => ({
+            ...m,
+            status: (m.status || 'delivered') as 'sending' | 'sent' | 'delivered' | 'error',
+          }));
+
           setMessages((prev) => {
-            if (prev.length === fetchedMsgs.length) {
-              let isSame = true;
-              for (let i = 0; i < prev.length; i++) {
-                const p = prev[i];
-                const f = fetchedMsgs[i];
-                if (
-                  p.id !== f.id ||
-                  p.content !== f.content ||
-                  p.isEdited !== f.isEdited ||
-                  p.isPinned !== f.isPinned ||
-                  (p.reactions?.length || 0) !== (f.reactions?.length || 0) ||
-                  p.taskData?.status !== f.taskData?.status ||
-                  p.bugData?.status !== f.bugData?.status
-                ) {
-                  isSame = false;
-                  break;
-                }
-              }
-              if (isSame) return prev;
-            }
-            setCachedMessages(viewKey, fetchedMsgs);
-            return fetchedMsgs;
+            // Retain any pending optimistic messages that are currently in-flight
+            const pendingOptimistic = prev.filter(
+              (m) =>
+                (m.status === 'sending' || m.id.startsWith('temp_')) &&
+                !fetchedMsgs.some(
+                  (f) =>
+                    f.id === m.id ||
+                    (f.senderId === m.senderId && f.content === m.content)
+                )
+            );
+
+            const combined = [...fetchedMsgs, ...pendingOptimistic];
+            setCachedMessages(viewKey, combined);
+            return combined;
           });
         }
       } else if (activeProjectId) {
@@ -575,8 +577,12 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
           fetch(`/api/messages?projectId=${activeProjectId}&channel=${activeChannel}`),
         ]);
 
+        if (currentSeq !== activeViewSeqRef.current) return; // Stale! View switched while fetch was running
+
         if (projRes.ok) {
           const pData = await projRes.json();
+          if (currentSeq !== activeViewSeqRef.current) return;
+
           if (pData.members) {
             setMembers((prev) => {
               if (prev.length === pData.members.length) {
@@ -677,30 +683,27 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
 
         if (msgRes.ok) {
           const mData = await msgRes.json();
-          const fetchedMsgs: Message[] = mData.messages || [];
+          if (currentSeq !== activeViewSeqRef.current) return;
+          const fetchedMsgs: Message[] = (mData.messages || []).map((m: Message) => ({
+            ...m,
+            status: (m.status || 'delivered') as 'sending' | 'sent' | 'delivered' | 'error',
+          }));
+
           setMessages((prev) => {
-            if (prev.length === fetchedMsgs.length) {
-              let isSame = true;
-              for (let i = 0; i < prev.length; i++) {
-                const p = prev[i];
-                const f = fetchedMsgs[i];
-                if (
-                  p.id !== f.id ||
-                  p.content !== f.content ||
-                  p.isEdited !== f.isEdited ||
-                  p.isPinned !== f.isPinned ||
-                  (p.reactions?.length || 0) !== (f.reactions?.length || 0) ||
-                  p.taskData?.status !== f.taskData?.status ||
-                  p.bugData?.status !== f.bugData?.status
-                ) {
-                  isSame = false;
-                  break;
-                }
-              }
-              if (isSame) return prev;
-            }
-            setCachedMessages(viewKey, fetchedMsgs);
-            return fetchedMsgs;
+            // Retain any pending optimistic messages that are currently in-flight
+            const pendingOptimistic = prev.filter(
+              (m) =>
+                (m.status === 'sending' || m.id.startsWith('temp_')) &&
+                !fetchedMsgs.some(
+                  (f) =>
+                    f.id === m.id ||
+                    (f.senderId === m.senderId && f.content === m.content)
+                )
+            );
+
+            const combined = [...fetchedMsgs, ...pendingOptimistic];
+            setCachedMessages(viewKey, combined);
+            return combined;
           });
         }
       }
@@ -1234,9 +1237,10 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     setIsMobileSidebarOpen(false);
     setStorageItem('devconnect_active_project', id);
     if (typeof window !== 'undefined') localStorage.removeItem('devconnect_active_conv_id');
-    const key = `proj_${id}_chan_${activeChannel}`;
+    const ch = activeChannel || 'general';
+    const key = `proj_${id}_chan_${ch}`;
     const cached = getCachedMessages(key);
-    if (cached) setMessages(cached);
+    setMessages(cached || []);
   };
 
   const deleteProject = async (projectId: string): Promise<boolean> => {
@@ -1283,13 +1287,16 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     setIsMobileSidebarOpen(false);
     setStorageItem('devconnect_active_channel', ch);
     if (typeof window !== 'undefined') localStorage.removeItem('devconnect_active_conv_id');
-    const key = `proj_${activeProjectId}_chan_${ch}`;
+    const pId = activeProjectId || 'proj_ai_employee';
+    if (!activeProjectId) setActiveProjectId(pId);
+    const key = `proj_${pId}_chan_${ch}`;
     const cached = getCachedMessages(key);
-    if (cached) setMessages(cached);
+    setMessages(cached || []);
   };
 
   const selectConversation = (conv: DirectConversation) => {
     setActiveConversation(conv);
+    setActiveProjectId(null);
     setIsMobileSidebarOpen(false);
     setStorageItem('devconnect_active_conv_id', conv.id);
     setConversations((prev) =>
@@ -1297,7 +1304,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     );
     const key = `conv_${conv.id}`;
     const cached = getCachedMessages(key);
-    if (cached) setMessages(cached);
+    setMessages(cached || []);
   };
 
   const activeProject = projects.find((p) => p.id === activeProjectId) || null;

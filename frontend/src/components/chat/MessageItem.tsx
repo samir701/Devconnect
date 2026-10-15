@@ -302,12 +302,12 @@ export function MessageItem({ message, onReplySelect, isConsecutive = false }: M
                     }`}
                   >
                     {message.content}
-                    {isConsecutive && isMe && (
+                    {isMe && (
                       <span className="inline-flex items-center ml-1.5 align-middle">
                         <DeliveryStatusIcon status={message.status} size="xs" />
                       </span>
                     )}
-                    {isConsecutive && message.isEdited && (
+                    {message.isEdited && (
                       <span className="text-[10px] text-slate-500 italic ml-1.5">
                         (edited)
                       </span>
@@ -323,12 +323,12 @@ export function MessageItem({ message, onReplySelect, isConsecutive = false }: M
                 }`}
               >
                 {message.content}
-                {isConsecutive && isMe && (
+                {isMe && (
                   <span className="inline-flex items-center ml-1.5 align-middle">
                     <DeliveryStatusIcon status={message.status} size="xs" />
                   </span>
                 )}
-                {isConsecutive && message.isEdited && (
+                {message.isEdited && (
                   <span className="text-[10px] text-slate-500 italic ml-1.5">
                     (edited)
                   </span>
