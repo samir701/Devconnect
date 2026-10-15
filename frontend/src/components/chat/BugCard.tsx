@@ -13,7 +13,17 @@ interface BugCardProps {
 const BUG_STATUSES: BugStatus[] = ['OPEN', 'INVESTIGATING', 'IN_PROGRESS', 'FIXED', 'CLOSED'];
 
 export function BugCard({ bug }: BugCardProps) {
-  const { updateBugStatus, setActiveRightTab, setIsRightPanelOpen } = useAppStore();
+  const { updateBugStatus, setActiveRightTab, setIsRightPanelOpen, users, members } = useAppStore();
+
+  const assignedUser =
+    (bug.assignedTo && bug.assigneeUser?.id === bug.assignedTo ? bug.assigneeUser : null) ||
+    (bug.assignedTo && bug.assignee?.id === bug.assignedTo ? bug.assignee : null) ||
+    users.find((u) => u.id === bug.assignedTo) ||
+    members.find((m) => m.userId === bug.assignedTo)?.user ||
+    bug.assigneeUser ||
+    bug.assignee;
+
+  const assigneeDisplayName = assignedUser?.name || (bug.assignedTo ? 'Assigned' : 'Unassigned');
 
   const handleStatusChange = (newStatus: BugStatus) => {
     updateBugStatus(bug.id, newStatus);
@@ -71,7 +81,7 @@ export function BugCard({ bug }: BugCardProps) {
             <User className="w-3 h-3 text-slate-500" />
             <span>Assigned:</span>
             <span className="text-slate-200 font-medium">
-              {bug.assigneeUser?.name || 'Unassigned'}
+              {assigneeDisplayName}
             </span>
           </div>
         </div>

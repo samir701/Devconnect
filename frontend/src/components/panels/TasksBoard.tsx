@@ -7,7 +7,7 @@ import { TaskStatus } from '@/lib/types';
 import { Plus, CheckSquare, Square, Calendar, User, CheckCircle2 } from 'lucide-react';
 
 export function TasksBoard() {
-  const { tasks, updateTaskStatus, setIsCreateTaskOpen } = useAppStore();
+  const { tasks, updateTaskStatus, setIsCreateTaskOpen, users, members } = useAppStore();
   const [filter, setFilter] = useState<'ALL' | TaskStatus>('ALL');
 
   const completedCount = tasks.filter((t) => t.status === 'COMPLETED').length;
@@ -123,19 +123,32 @@ export function TasksBoard() {
                     </p>
                   )}
 
-                  <div className="flex items-center justify-between text-[10px] text-slate-500 mt-2 pt-1.5 border-t border-white/5">
-                    <span className="flex items-center gap-1">
-                      <User className="w-3 h-3" />
-                      {task.assigneeUser?.name || 'Samir'}
-                    </span>
+                  {(() => {
+                    const assignedUser =
+                      (task.assignedTo && task.assigneeUser?.id === task.assignedTo ? task.assigneeUser : null) ||
+                      (task.assignedTo && task.assignee?.id === task.assignedTo ? task.assignee : null) ||
+                      users.find((u) => u.id === task.assignedTo) ||
+                      members.find((m) => m.userId === task.assignedTo)?.user ||
+                      task.assigneeUser ||
+                      task.assignee;
+                    const assigneeName = assignedUser?.name || (task.assignedTo ? 'Assigned' : 'Unassigned');
 
-                    {task.dueDate && (
-                      <span className="flex items-center gap-1 text-amber-400/80">
-                        <Calendar className="w-3 h-3" />
-                        {task.dueDate}
-                      </span>
-                    )}
-                  </div>
+                    return (
+                      <div className="flex items-center justify-between text-[10px] text-slate-500 mt-2 pt-1.5 border-t border-white/5">
+                        <span className="flex items-center gap-1">
+                          <User className="w-3 h-3 text-slate-400" />
+                          <span className="text-slate-300 font-medium">{assigneeName}</span>
+                        </span>
+
+                        {task.dueDate && (
+                          <span className="flex items-center gap-1 text-amber-400/80">
+                            <Calendar className="w-3 h-3" />
+                            {task.dueDate}
+                          </span>
+                        )}
+                      </div>
+                    );
+                  })()}
                 </div>
               </div>
             </div>

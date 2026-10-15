@@ -9,7 +9,7 @@ import { Plus, Bug as BugIcon, User, Terminal } from 'lucide-react';
 const STATUS_OPTIONS: BugStatus[] = ['OPEN', 'INVESTIGATING', 'IN_PROGRESS', 'FIXED', 'CLOSED'];
 
 export function BugsBoard() {
-  const { bugs, updateBugStatus, setIsCreateBugOpen } = useAppStore();
+  const { bugs, updateBugStatus, setIsCreateBugOpen, users, members } = useAppStore();
   const [filter, setFilter] = useState<'ALL' | BugStatus>('ALL');
 
   const openCount = bugs.filter((b) => b.status !== 'FIXED' && b.status !== 'CLOSED').length;
@@ -86,24 +86,37 @@ export function BugsBoard() {
               </div>
             )}
 
-            <div className="flex items-center justify-between text-[11px] text-slate-400 pt-2 border-t border-white/5">
-              <span className="flex items-center gap-1 text-[10px]">
-                <User className="w-3 h-3" />
-                {bug.assigneeUser?.name || 'Unassigned'}
-              </span>
+            {(() => {
+              const assignedUser =
+                (bug.assignedTo && bug.assigneeUser?.id === bug.assignedTo ? bug.assigneeUser : null) ||
+                (bug.assignedTo && bug.assignee?.id === bug.assignedTo ? bug.assignee : null) ||
+                users.find((u) => u.id === bug.assignedTo) ||
+                members.find((m) => m.userId === bug.assignedTo)?.user ||
+                bug.assigneeUser ||
+                bug.assignee;
+              const assigneeName = assignedUser?.name || (bug.assignedTo ? 'Assigned' : 'Unassigned');
 
-              <select
-                value={bug.status}
-                onChange={(e) => updateBugStatus(bug.id, e.target.value as BugStatus)}
-                className="text-[11px] bg-white/5 hover:bg-white/10 text-slate-200 border border-white/10 rounded-md px-2 py-0.5 outline-none cursor-pointer"
-              >
-                {STATUS_OPTIONS.map((opt) => (
-                  <option key={opt} value={opt} className="bg-slate-900 text-white">
-                    {opt.replace('_', ' ')}
-                  </option>
-                ))}
-              </select>
-            </div>
+              return (
+                <div className="flex items-center justify-between text-[11px] text-slate-400 pt-2 border-t border-white/5">
+                  <span className="flex items-center gap-1 text-[10px]">
+                    <User className="w-3 h-3 text-slate-400" />
+                    <span className="text-slate-300 font-medium">{assigneeName}</span>
+                  </span>
+
+                  <select
+                    value={bug.status}
+                    onChange={(e) => updateBugStatus(bug.id, e.target.value as BugStatus)}
+                    className="text-[11px] bg-white/5 hover:bg-white/10 text-slate-200 border border-white/10 rounded-md px-2 py-0.5 outline-none cursor-pointer"
+                  >
+                    {STATUS_OPTIONS.map((opt) => (
+                      <option key={opt} value={opt} className="bg-slate-900 text-white">
+                        {opt.replace('_', ' ')}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              );
+            })()}
           </div>
         ))}
 

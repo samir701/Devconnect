@@ -13,12 +13,22 @@ interface TaskCardProps {
 const TASK_STATUSES: TaskStatus[] = ['TODO', 'IN_PROGRESS', 'REVIEW', 'COMPLETED'];
 
 export function TaskCard({ task }: TaskCardProps) {
-  const { updateTaskStatus, setActiveRightTab, setIsRightPanelOpen } = useAppStore();
+  const { updateTaskStatus, setActiveRightTab, setIsRightPanelOpen, users, members } = useAppStore();
   const [currentStatus, setCurrentStatus] = React.useState<TaskStatus>(task.status);
 
   React.useEffect(() => {
     setCurrentStatus(task.status);
   }, [task.status]);
+
+  const assignedUser =
+    (task.assignedTo && task.assigneeUser?.id === task.assignedTo ? task.assigneeUser : null) ||
+    (task.assignedTo && task.assignee?.id === task.assignedTo ? task.assignee : null) ||
+    users.find((u) => u.id === task.assignedTo) ||
+    members.find((m) => m.userId === task.assignedTo)?.user ||
+    task.assigneeUser ||
+    task.assignee;
+
+  const assigneeDisplayName = assignedUser?.name || (task.assignedTo ? 'Assigned' : 'Unassigned');
 
   const isCompleted = currentStatus === 'COMPLETED';
 
@@ -94,7 +104,7 @@ export function TaskCard({ task }: TaskCardProps) {
         <div className="flex items-center gap-3">
           <div className="flex items-center gap-1 text-[11px] text-slate-400">
             <User className="w-3 h-3 text-slate-500" />
-            <span>{task.assigneeUser?.name || 'Samir'}</span>
+            <span className="text-slate-200 font-medium">{assigneeDisplayName}</span>
           </div>
 
           {task.dueDate && (

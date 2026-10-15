@@ -604,15 +604,32 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
           }
           setUserRole(pData.userRole || null);
           if (pData.tasks) {
+            const mappedTasks: Task[] = pData.tasks.map((t: Task) => {
+              const assignedUser =
+                (t.assignedTo && t.assigneeUser?.id === t.assignedTo ? t.assigneeUser : null) ||
+                (t.assignedTo && t.assignee?.id === t.assignedTo ? t.assignee : null) ||
+                usersRef.current.find((u) => u.id === t.assignedTo) ||
+                (pData.members || []).find((m: any) => m.userId === t.assignedTo)?.user ||
+                t.assigneeUser ||
+                t.assignee;
+              return {
+                ...t,
+                assigneeUser: assignedUser || t.assigneeUser,
+              };
+            });
+
             setTasks((prev) => {
-              if (prev.length === pData.tasks.length) {
+              if (prev.length === mappedTasks.length) {
                 let same = true;
                 for (let i = 0; i < prev.length; i++) {
                   if (
-                    prev[i].id !== pData.tasks[i].id ||
-                    prev[i].status !== pData.tasks[i].status ||
-                    prev[i].title !== pData.tasks[i].title ||
-                    prev[i].priority !== pData.tasks[i].priority
+                    prev[i].id !== mappedTasks[i].id ||
+                    prev[i].status !== mappedTasks[i].status ||
+                    prev[i].title !== mappedTasks[i].title ||
+                    prev[i].priority !== mappedTasks[i].priority ||
+                    prev[i].assignedTo !== mappedTasks[i].assignedTo ||
+                    prev[i].assigneeUser?.id !== mappedTasks[i].assigneeUser?.id ||
+                    prev[i].assigneeUser?.name !== mappedTasks[i].assigneeUser?.name
                   ) {
                     same = false;
                     break;
@@ -620,19 +637,36 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
                 }
                 if (same) return prev;
               }
-              return pData.tasks;
+              return mappedTasks;
             });
           }
           if (pData.bugs) {
+            const mappedBugs: Bug[] = pData.bugs.map((b: Bug) => {
+              const assignedUser =
+                (b.assignedTo && b.assigneeUser?.id === b.assignedTo ? b.assigneeUser : null) ||
+                (b.assignedTo && b.assignee?.id === b.assignedTo ? b.assignee : null) ||
+                usersRef.current.find((u) => u.id === b.assignedTo) ||
+                (pData.members || []).find((m: any) => m.userId === b.assignedTo)?.user ||
+                b.assigneeUser ||
+                b.assignee;
+              return {
+                ...b,
+                assigneeUser: assignedUser || b.assigneeUser,
+              };
+            });
+
             setBugs((prev) => {
-              if (prev.length === pData.bugs.length) {
+              if (prev.length === mappedBugs.length) {
                 let same = true;
                 for (let i = 0; i < prev.length; i++) {
                   if (
-                    prev[i].id !== pData.bugs[i].id ||
-                    prev[i].status !== pData.bugs[i].status ||
-                    prev[i].title !== pData.bugs[i].title ||
-                    prev[i].priority !== pData.bugs[i].priority
+                    prev[i].id !== mappedBugs[i].id ||
+                    prev[i].status !== mappedBugs[i].status ||
+                    prev[i].title !== mappedBugs[i].title ||
+                    prev[i].priority !== mappedBugs[i].priority ||
+                    prev[i].assignedTo !== mappedBugs[i].assignedTo ||
+                    prev[i].assigneeUser?.id !== mappedBugs[i].assigneeUser?.id ||
+                    prev[i].assigneeUser?.name !== mappedBugs[i].assigneeUser?.name
                   ) {
                     same = false;
                     break;
@@ -640,7 +674,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
                 }
                 if (same) return prev;
               }
-              return pData.bugs;
+              return mappedBugs;
             });
           }
           if (pData.attachments) {
@@ -1616,11 +1650,22 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       });
       if (res.ok) {
         const created = await res.json();
-        setTasks((prev) => [created.task, ...prev]);
+        const createdTaskObj = created.task;
+        const assignedUser =
+          (createdTaskObj.assignedTo && createdTaskObj.assigneeUser?.id === createdTaskObj.assignedTo ? createdTaskObj.assigneeUser : null) ||
+          usersRef.current.find((u) => u.id === createdTaskObj.assignedTo) ||
+          createdTaskObj.assigneeUser;
+
+        const taskWithAssignee: Task = {
+          ...createdTaskObj,
+          assigneeUser: assignedUser || createdTaskObj.assigneeUser,
+        };
+
+        setTasks((prev) => [taskWithAssignee, ...prev]);
         setIsCreateTaskOpen(false);
         setPrefillTask(null);
         fetchActiveDetails();
-        return created.task;
+        return taskWithAssignee;
       }
     } catch (err) {
       console.error('Failed to create task:', err);
@@ -1745,11 +1790,22 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       });
       if (res.ok) {
         const created = await res.json();
-        setBugs((prev) => [created.bug, ...prev]);
+        const createdBugObj = created.bug;
+        const assignedUser =
+          (createdBugObj.assignedTo && createdBugObj.assigneeUser?.id === createdBugObj.assignedTo ? createdBugObj.assigneeUser : null) ||
+          usersRef.current.find((u) => u.id === createdBugObj.assignedTo) ||
+          createdBugObj.assigneeUser;
+
+        const bugWithAssignee: Bug = {
+          ...createdBugObj,
+          assigneeUser: assignedUser || createdBugObj.assigneeUser,
+        };
+
+        setBugs((prev) => [bugWithAssignee, ...prev]);
         setIsCreateBugOpen(false);
         setPrefillBug(null);
         fetchActiveDetails();
-        return created.bug;
+        return bugWithAssignee;
       }
     } catch (err) {
       console.error('Failed to create bug:', err);

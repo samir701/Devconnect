@@ -80,6 +80,8 @@ export function MessageItem({ message, onReplySelect, isConsecutive = false }: M
     currentUser,
     tasks,
     bugs,
+    users,
+    members,
     toggleReaction,
     editMessage,
     deleteMessage,
@@ -129,6 +131,16 @@ export function MessageItem({ message, onReplySelect, isConsecutive = false }: M
   const storeBug = bugs.find(
     (b) => b.id === targetBugId || b.id === bugMeta?.bugId || b.messageId === message.id
   );
+  const bugAssignedTo = storeBug?.assignedTo || message.bugData?.assignedTo || bugMeta?.assignedTo;
+  const bugAssigneeUser =
+    (bugAssignedTo && storeBug?.assigneeUser?.id === bugAssignedTo ? storeBug?.assigneeUser : null) ||
+    (bugAssignedTo && message.bugData?.assigneeUser?.id === bugAssignedTo ? message.bugData?.assigneeUser : null) ||
+    (bugAssignedTo ? users.find((u) => u.id === bugAssignedTo) : null) ||
+    (bugAssignedTo ? members.find((m) => m.userId === bugAssignedTo)?.user : null) ||
+    storeBug?.assigneeUser ||
+    message.bugData?.assigneeUser ||
+    (bugAssignedTo === message.senderId ? message.sender : undefined);
+
   const resolvedBug = storeBug || message.bugData || (message.messageType === 'BUG' ? {
     id: targetBugId,
     projectId: message.projectId || 'proj_ai_employee',
@@ -138,8 +150,8 @@ export function MessageItem({ message, onReplySelect, isConsecutive = false }: M
     endpoint: bugMeta?.endpoint || '',
     priority: bugMeta?.priority || 'HIGH',
     status: bugMeta?.status || 'OPEN',
-    assignedTo: bugMeta?.assignedTo || message.senderId,
-    assigneeUser: message.sender,
+    assignedTo: bugAssignedTo || message.senderId,
+    assigneeUser: bugAssigneeUser,
     createdBy: message.senderId,
     createdAt: message.createdAt,
   } : null);
@@ -151,6 +163,16 @@ export function MessageItem({ message, onReplySelect, isConsecutive = false }: M
   const storeTask = tasks.find(
     (t) => t.id === targetTaskId || t.id === taskMeta?.taskId || t.messageId === message.id
   );
+  const taskAssignedTo = storeTask?.assignedTo || message.taskData?.assignedTo || taskMeta?.assignedTo;
+  const taskAssigneeUser =
+    (taskAssignedTo && storeTask?.assigneeUser?.id === taskAssignedTo ? storeTask?.assigneeUser : null) ||
+    (taskAssignedTo && message.taskData?.assigneeUser?.id === taskAssignedTo ? message.taskData?.assigneeUser : null) ||
+    (taskAssignedTo ? users.find((u) => u.id === taskAssignedTo) : null) ||
+    (taskAssignedTo ? members.find((m) => m.userId === taskAssignedTo)?.user : null) ||
+    storeTask?.assigneeUser ||
+    message.taskData?.assigneeUser ||
+    (taskAssignedTo === message.senderId ? message.sender : undefined);
+
   const resolvedTask = storeTask || message.taskData || (message.messageType === 'TASK' ? {
     id: targetTaskId,
     projectId: message.projectId || 'proj_ai_employee',
@@ -159,8 +181,8 @@ export function MessageItem({ message, onReplySelect, isConsecutive = false }: M
     description: taskMeta?.description || message.content,
     priority: taskMeta?.priority || 'MEDIUM',
     status: taskMeta?.status || 'TODO',
-    assignedTo: taskMeta?.assignedTo || message.senderId,
-    assigneeUser: message.sender,
+    assignedTo: taskAssignedTo || message.senderId,
+    assigneeUser: taskAssigneeUser,
     createdBy: message.senderId,
     dueDate: taskMeta?.dueDate || 'Today',
     createdAt: message.createdAt,

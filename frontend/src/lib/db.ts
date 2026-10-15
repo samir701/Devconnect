@@ -1037,21 +1037,52 @@ export async function createMessage(msgData: Omit<Message, 'id' | 'createdAt'>):
         },
       });
 
-      if (msgData.taskData?.id) {
+      let linkedTaskId = msgData.taskData?.id;
+      if (!linkedTaskId && msgData.metadata) {
         try {
-          await prisma.task.update({
-            where: { id: msgData.taskData.id },
-            data: { messageId: id },
-          });
+          const parsed = JSON.parse(msgData.metadata);
+          linkedTaskId = parsed.taskId || parsed.id;
         } catch { }
       }
-      if (msgData.bugData?.id) {
+      if (linkedTaskId) {
         try {
-          await prisma.bug.update({
-            where: { id: msgData.bugData.id },
+          await prisma.task.update({
+            where: { id: linkedTaskId },
             data: { messageId: id },
           });
+        } catch {
+          try {
+            const stripped = linkedTaskId.replace(/^task_/, '');
+            const found = await prisma.task.findFirst({ where: { OR: [{ id: stripped }, { messageId: linkedTaskId }] } });
+            if (found) {
+              await prisma.task.update({ where: { id: found.id }, data: { messageId: id } });
+            }
+          } catch { }
+        }
+      }
+
+      let linkedBugId = msgData.bugData?.id;
+      if (!linkedBugId && msgData.metadata) {
+        try {
+          const parsed = JSON.parse(msgData.metadata);
+          linkedBugId = parsed.bugId || parsed.id;
         } catch { }
+      }
+      if (linkedBugId) {
+        try {
+          await prisma.bug.update({
+            where: { id: linkedBugId },
+            data: { messageId: id },
+          });
+        } catch {
+          try {
+            const stripped = linkedBugId.replace(/^bug_/, '');
+            const found = await prisma.bug.findFirst({ where: { OR: [{ id: stripped }, { messageId: linkedBugId }] } });
+            if (found) {
+              await prisma.bug.update({ where: { id: found.id }, data: { messageId: id } });
+            }
+          } catch { }
+        }
       }
     } catch (err) {
       console.error('Error persisting message in TiDB:', err);

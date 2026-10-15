@@ -45,8 +45,28 @@ export async function GET(
                 },
               },
             },
-            tasks: true,
-            bugs: true,
+            tasks: {
+              include: {
+                assignee: {
+                  select: { id: true, name: true, email: true, avatarUrl: true, headline: true, status: true },
+                },
+                creator: {
+                  select: { id: true, name: true, email: true, avatarUrl: true, headline: true, status: true },
+                },
+              },
+              orderBy: { createdAt: 'desc' },
+            },
+            bugs: {
+              include: {
+                assignee: {
+                  select: { id: true, name: true, email: true, avatarUrl: true, headline: true, status: true },
+                },
+                reporter: {
+                  select: { id: true, name: true, email: true, avatarUrl: true, headline: true, status: true },
+                },
+              },
+              orderBy: { createdAt: 'desc' },
+            },
             attachments: true,
           },
         });
@@ -60,8 +80,21 @@ export async function GET(
               channels: dbProject.channels ? JSON.parse(dbProject.channels) : ['general', 'development', 'bugs', 'tasks', 'files', 'activity'],
             },
             members: dbProject.members,
-            tasks: dbProject.tasks,
-            bugs: dbProject.bugs,
+            tasks: dbProject.tasks.map((t) => ({
+              ...t,
+              dueDate: t.dueDate ? t.dueDate.toISOString() : undefined,
+              createdAt: t.createdAt.toISOString(),
+              updatedAt: t.updatedAt.toISOString(),
+              assigneeUser: t.assignee || undefined,
+              creatorUser: t.creator || undefined,
+            })),
+            bugs: dbProject.bugs.map((b) => ({
+              ...b,
+              createdAt: b.createdAt.toISOString(),
+              updatedAt: b.updatedAt.toISOString(),
+              assigneeUser: b.assignee || undefined,
+              creatorUser: b.reporter || undefined,
+            })),
             attachments: dbProject.attachments,
             userRole,
           });
