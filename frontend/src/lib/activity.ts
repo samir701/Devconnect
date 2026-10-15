@@ -1,16 +1,12 @@
 import { prisma } from './prisma';
 import { ActivityLog, ActionType, User } from './types';
 
-const SOCKET_SERVER_URL = process.env.NEXT_PUBLIC_SOCKET_URL || 'http://localhost:3001';
+const SOCKET_SERVER_URL =
+  process.env.INTERNAL_SOCKET_URL ||
+  process.env.NEXT_PUBLIC_SOCKET_URL ||
+  (process.env.NODE_ENV === 'production' ? 'https://devconnect-a2wa.onrender.com' : 'http://localhost:3001');
 
-const DATABASE_URL = process.env.DATABASE_URL || process.env.TIDB_DATABASE_URL;
-const isDatabaseConfigured = Boolean(
-  DATABASE_URL &&
-  !DATABASE_URL.includes('<USERNAME>') &&
-  !DATABASE_URL.includes('<PASSWORD>') &&
-  !DATABASE_URL.includes('username:password') &&
-  !DATABASE_URL.includes('YourPassword')
-);
+const isDatabaseConfigured = true;
 
 export interface LogActivityParams {
   projectId: string;

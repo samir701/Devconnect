@@ -31,35 +31,40 @@ import {
 import { logActivity, emitRealtimeEvent, getActivityFeed } from './activity';
 
 // TiDB Cloud Serverless Connection
-const DATABASE_URL = process.env.DATABASE_URL || process.env.TIDB_DATABASE_URL;
-const TIDB_HOST = process.env.TIDB_HOST;
+const DEFAULT_DATABASE_URL =
+  'mysql://2gbvCHB7bimYT2o.root:ZMVsFTMPh846aMiR@gateway01.ap-southeast-1.prod.aws.tidbcloud.com:4000/devconnect?sslaccept=strict';
 
-export const isDatabaseConfigured = Boolean(
-  DATABASE_URL &&
-  !DATABASE_URL.includes('<USERNAME>') &&
-  !DATABASE_URL.includes('<PASSWORD>') &&
-  !DATABASE_URL.includes('username:password') &&
-  !DATABASE_URL.includes('YourPassword')
-);
+const rawDbUrl = process.env.DATABASE_URL || process.env.TIDB_DATABASE_URL;
+const DATABASE_URL =
+  rawDbUrl &&
+  !rawDbUrl.includes('<USERNAME>') &&
+  !rawDbUrl.includes('<PASSWORD>') &&
+  !rawDbUrl.includes('username:password') &&
+  !rawDbUrl.includes('YourPassword')
+    ? rawDbUrl
+    : DEFAULT_DATABASE_URL;
+
+const TIDB_HOST = process.env.TIDB_HOST || 'gateway01.ap-southeast-1.prod.aws.tidbcloud.com';
+
+export const isDatabaseConfigured = true;
 
 let tidbClient: ReturnType<typeof connect> | null = null;
 
-if (isDatabaseConfigured && DATABASE_URL) {
-  try {
-    tidbClient = connect({ url: DATABASE_URL });
-  } catch (err) {
-    console.warn('[TiDB] Failed to connect using DATABASE_URL:', err);
-  }
-} else if (isDatabaseConfigured && TIDB_HOST && process.env.TIDB_USER && process.env.TIDB_PASSWORD) {
-  try {
-    tidbClient = connect({
-      host: TIDB_HOST,
-      username: process.env.TIDB_USER,
-      password: process.env.TIDB_PASSWORD,
-      database: process.env.TIDB_DATABASE || 'devconnect',
-    });
-  } catch (err) {
-    console.warn('[TiDB] Failed to connect using TiDB credentials:', err);
+try {
+  tidbClient = connect({ url: DATABASE_URL });
+} catch (err) {
+  console.warn('[TiDB] Failed to connect using DATABASE_URL:', err);
+  if (TIDB_HOST && process.env.TIDB_USER && process.env.TIDB_PASSWORD) {
+    try {
+      tidbClient = connect({
+        host: TIDB_HOST,
+        username: process.env.TIDB_USER,
+        password: process.env.TIDB_PASSWORD,
+        database: process.env.TIDB_DATABASE || 'devconnect',
+      });
+    } catch (err2) {
+      console.warn('[TiDB] Failed to connect using TiDB credentials:', err2);
+    }
   }
 }
 
@@ -245,27 +250,133 @@ export function getDbStatus() {
 }
 
 // ================= USER OPERATIONS =================
+function mapDbUserToUser(u: any): User {
+  let parsedSkills: string[] = ['JavaScript', 'TypeScript'];
+  if (u.skills) {
+    try {
+      parsedSkills =
+        typeof u.skills === 'string' && u.skills.startsWith('[')
+          ? JSON.parse(u.skills)
+          : u.skills.split(',').map((s: string) => s.trim()).filter(Boolean);
+    } catch {
+      parsedSkills = ['JavaScript', 'TypeScript'];
+    }
+  }
+  return {
+    id: u.id,
+    name: u.name,
+    email: u.email,
+    passwordHash: u.passwordHash || undefined,
+    avatarUrl: u.avatarUrl || `https://api.dicebear.com/7.x/avataaars/svg?seed=${encodeURIComponent(u.name)}`,
+    title: u.headline || 'Software Developer',
+    skills: parsedSkills,
+    status: (u.status === 'AVAILABLE' ? 'ONLINE' : u.status === 'AWAY' ? 'AWAY' : 'OFFLINE') as any,
+    lastSeen: u.lastSeen ? new Date(u.lastSeen).toISOString() : 'Just now',
+    bio: u.bio || undefined,
+    githubUrl: u.githubUrl || undefined,
+    linkedinUrl: u.linkedinUrl || undefined,
+  };
+}
+
 export async function getUsers(): Promise<User[]> {
+  try {
+    const dbUsers = await prisma.user.findMany();
+    if (dbUsers && dbUsers.length > 0) {
+      for (const u of dbUsers) {
+        store.users.set(u.id, mapDbUserToUser(u));
+      }
+      return dbUsers
+        .map(mapDbUserToUser)
+        .filter((u) => !u.email.endsWith('@test.dev') && !u.email.endsWith('@example.com'));
+    }
+  } catch (err) {
+    console.warn('[DB] Failed to fetch users from database, using local store:', err);
+  }
   return Array.from(store.users.values()).filter(
     (u) => !u.email.endsWith('@test.dev') && !u.email.endsWith('@example.com')
   );
 }
 
 export async function getUserById(id: string): Promise<User | null> {
+  try {
+    const u = await prisma.user.findUnique({ where: { id } });
+    if (u) {
+      const mapped = mapDbUserToUser(u);
+      store.users.set(u.id, mapped);
+      return mapped;
+    }
+  } catch (err) {
+    console.warn('[DB] Failed to fetch user by id from database:', err);
+  }
   return store.users.get(id) || null;
 }
 
+export async function getUserByEmail(email: string): Promise<User | null> {
+  try {
+    const u = await prisma.user.findUnique({ where: { email } });
+    if (u) {
+      const mapped = mapDbUserToUser(u);
+      store.users.set(u.id, mapped);
+      return mapped;
+    }
+  } catch (err) {
+    console.warn('[DB] Failed to fetch user by email from database:', err);
+  }
+  const users = Array.from(store.users.values());
+  return users.find((u) => u.email.toLowerCase() === email.toLowerCase()) || null;
+}
+
+export async function createUser(userData: User): Promise<User> {
+  try {
+    await prisma.user.create({
+      data: {
+        id: userData.id,
+        name: userData.name,
+        email: userData.email,
+        passwordHash: userData.passwordHash || null,
+        avatarUrl: userData.avatarUrl || null,
+        headline: userData.title || null,
+        skills: JSON.stringify(userData.skills || []),
+        status: 'AVAILABLE',
+      },
+    });
+  } catch (err) {
+    console.warn('[DB] Failed to create user in database:', err);
+  }
+  store.users.set(userData.id, userData);
+  saveStoreToDisk();
+  return userData;
+}
+
 export async function updateUser(id: string, partial: Partial<User>): Promise<User | null> {
+  try {
+    const dataToUpdate: any = {};
+    if (partial.name !== undefined) dataToUpdate.name = partial.name;
+    if (partial.avatarUrl !== undefined) dataToUpdate.avatarUrl = partial.avatarUrl;
+    if (partial.title !== undefined) dataToUpdate.headline = partial.title;
+    if (partial.skills !== undefined) dataToUpdate.skills = JSON.stringify(partial.skills);
+    if (partial.bio !== undefined) dataToUpdate.bio = partial.bio;
+    if (partial.githubUrl !== undefined) dataToUpdate.githubUrl = partial.githubUrl;
+    if (partial.linkedinUrl !== undefined) dataToUpdate.linkedinUrl = partial.linkedinUrl;
+    if (partial.passwordHash !== undefined) dataToUpdate.passwordHash = partial.passwordHash;
+    if (partial.status !== undefined) {
+      dataToUpdate.status = partial.status === 'ONLINE' ? 'AVAILABLE' : partial.status === 'AWAY' ? 'AWAY' : 'OFFLINE';
+    }
+    if (Object.keys(dataToUpdate).length > 0) {
+      await prisma.user.update({
+        where: { id },
+        data: dataToUpdate,
+      });
+    }
+  } catch (err) {
+    console.warn('[DB] Failed to update user in database:', err);
+  }
   const current = store.users.get(id);
   if (!current) return null;
   const updated = { ...current, ...partial };
   store.users.set(id, updated);
+  saveStoreToDisk();
   return updated;
-}
-
-export async function getUserByEmail(email: string): Promise<User | null> {
-  const users = Array.from(store.users.values());
-  return users.find((u) => u.email.toLowerCase() === email.toLowerCase()) || null;
 }
 
 // ================= PROJECT OPERATIONS =================

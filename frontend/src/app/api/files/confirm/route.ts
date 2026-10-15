@@ -33,7 +33,9 @@ export async function POST(request: Request) {
       const socketServerUrl =
         process.env.INTERNAL_SOCKET_URL ||
         process.env.NEXT_PUBLIC_SOCKET_URL ||
-        'http://localhost:3001';
+        (process.env.NODE_ENV === 'production'
+          ? 'https://devconnect-a2wa.onrender.com'
+          : 'http://localhost:3001');
 
       // Non-blocking trigger to socket server
       fetch(`${socketServerUrl}/api/events/file_uploaded`, {

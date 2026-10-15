@@ -1,6 +1,6 @@
 import bcrypt from 'bcryptjs';
 import { User } from './types';
-import { getUserById, updateUser, getUsers, saveStoreToDisk } from './db';
+import { getUserById, updateUser, getUsers, getUserByEmail, createUser, saveStoreToDisk } from './db';
 
 // In-memory verification & reset tokens for serverless session lifecycle
 declare global {
@@ -38,8 +38,7 @@ export async function registerUser(params: {
   title?: string;
   skills?: string[];
 }): Promise<{ user: User; token: string }> {
-  const users = await getUsers();
-  const existing = users.find((u) => u.email.toLowerCase() === params.email.toLowerCase());
+  const existing = (await getUserByEmail(params.email)) || (await getUsers()).find((u) => u.email.toLowerCase() === params.email.toLowerCase());
   if (existing) {
     throw new Error('A developer account with this email already exists.');
   }
@@ -60,11 +59,11 @@ export async function registerUser(params: {
     currentProjectId: 'proj_ai_employee',
   };
 
-  // Add to store
-  if (globalThis.__devconnect_store) {
-    globalThis.__devconnect_store.users.set(id, newUser);
+  // Persist to TiDB database and in-memory store
+  await createUser(newUser);
 
-    // Auto-assign user to initial workspace projects as DEVELOPER
+  // Auto-assign user to initial workspace projects as DEVELOPER in local store
+  if (globalThis.__devconnect_store) {
     const defaultProjects = ['proj_ai_employee', 'proj_client_portal'];
     for (const pid of defaultProjects) {
       const alreadyMember = globalThis.__devconnect_store.members.some(
@@ -96,8 +95,11 @@ export async function registerUser(params: {
 }
 
 export async function loginUser(email: string, password?: string): Promise<{ user: User; token: string }> {
-  const users = await getUsers();
-  const user = users.find((u) => u.email.toLowerCase() === email.toLowerCase());
+  let user = await getUserByEmail(email);
+  if (!user) {
+    const users = await getUsers();
+    user = users.find((u) => u.email.toLowerCase() === email.toLowerCase()) || null;
+  }
   if (!user) {
     throw new Error('No user account found with that email address.');
   }
@@ -112,12 +114,9 @@ export async function loginUser(email: string, password?: string): Promise<{ use
     }
   }
 
+  await updateUser(user.id, { status: 'ONLINE', lastSeen: 'Just now' });
   user.status = 'ONLINE';
   user.lastSeen = 'Just now';
-  if (globalThis.__devconnect_store) {
-    globalThis.__devconnect_store.users.set(user.id, user);
-    saveStoreToDisk();
-  }
 
   const token = `devconn_token_${Date.now()}_${user.id}`;
   authStore.sessions.set(token, {

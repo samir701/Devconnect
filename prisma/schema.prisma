@@ -58,6 +58,7 @@ model User {
   id          String      @id @default(cuid())
   email       String      @unique
   name        String
+  passwordHash String?    @db.VarChar(255)
   avatarUrl   String?     @db.VarChar(1000)
   bio         String?     @db.Text
   headline    String?     @db.VarChar(500) // e.g. "Frontend Developer | AI/ML | Python"

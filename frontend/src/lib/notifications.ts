@@ -40,8 +40,11 @@ interface CreateNotificationParams {
 
 async function emitToSocket(event: string, payload: Record<string, unknown>): Promise<void> {
   const socketUrl =
+    process.env.INTERNAL_SOCKET_URL ||
     process.env.NEXT_PUBLIC_SOCKET_URL ||
-    `http://localhost:${process.env.SOCKET_PORT || 3001}`;
+    (process.env.NODE_ENV === 'production'
+      ? 'https://devconnect-a2wa.onrender.com'
+      : `http://localhost:${process.env.SOCKET_PORT || 3001}`);
 
   try {
     await fetch(`${socketUrl}/events/${event}`, {

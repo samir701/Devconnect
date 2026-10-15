@@ -110,8 +110,8 @@ export function CallProvider({ children }: { children: React.ReactNode }) {
     if (!socket) {
       const socketUrl =
         process.env.NEXT_PUBLIC_SOCKET_URL ||
-        (typeof window !== 'undefined'
-          ? `${window.location.protocol}//${window.location.hostname}:3001`
+        (typeof window !== 'undefined' && !window.location.hostname.includes('localhost') && !window.location.hostname.includes('127.0.0.1')
+          ? 'https://devconnect-a2wa.onrender.com'
           : 'http://localhost:3001');
 
       import('socket.io-client').then(({ io }) => {
