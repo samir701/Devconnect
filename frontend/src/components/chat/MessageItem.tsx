@@ -19,6 +19,8 @@ import {
   Edit2,
   CornerDownRight,
   Check,
+  CheckCheck,
+  AlertCircle,
   X,
 } from 'lucide-react';
 
@@ -29,6 +31,49 @@ interface MessageItemProps {
 }
 
 const COMMON_EMOJIS = ['👍', '❤️', '🚀', '🔥', '🐛', '👀', '🎉', '💡'];
+
+function DeliveryStatusIcon({
+  status,
+  size = 'sm',
+}: {
+  status?: 'sending' | 'sent' | 'delivered' | 'error';
+  size?: 'xs' | 'sm';
+}) {
+  const isXs = size === 'xs';
+  const iconClass = isXs ? 'w-3 h-3' : 'w-3.5 h-3.5';
+
+  if (status === 'sending') {
+    return (
+      <span
+        className="inline-flex items-center text-slate-400 select-none"
+        title="Sending..."
+      >
+        <Check className={`${iconClass} text-slate-400 animate-pulse`} />
+      </span>
+    );
+  }
+
+  if (status === 'error') {
+    return (
+      <span
+        className="inline-flex items-center text-rose-400 select-none"
+        title="Failed to deliver. Please try again."
+      >
+        <AlertCircle className={`${iconClass} text-rose-400`} />
+      </span>
+    );
+  }
+
+  // Delivered (default state for confirmed messages)
+  return (
+    <span
+      className="inline-flex items-center text-cyan-400 select-none animate-in zoom-in-75 duration-150"
+      title="Delivered"
+    >
+      <CheckCheck className={`${iconClass} text-cyan-400 drop-shadow-[0_0_4px_rgba(34,211,238,0.35)]`} />
+    </span>
+  );
+}
 
 export function MessageItem({ message, onReplySelect, isConsecutive = false }: MessageItemProps) {
   const {
@@ -138,8 +183,16 @@ export function MessageItem({ message, onReplySelect, isConsecutive = false }: M
         />
       ) : (
         <div className="w-10 flex items-center justify-center shrink-0">
-          <span className="text-[9px] text-slate-600 opacity-0 group-hover:opacity-100 transition-opacity select-none font-mono" suppressHydrationWarning>
-            {formatTimestamp(message.createdAt)}
+          <span
+            className={`text-[9px] text-slate-600 transition-opacity select-none font-mono flex items-center gap-1 ${
+              message.status === 'sending' || message.status === 'error'
+                ? 'opacity-100'
+                : 'opacity-0 group-hover:opacity-100'
+            }`}
+            suppressHydrationWarning
+          >
+            <span>{formatTimestamp(message.createdAt)}</span>
+            {isMe && <DeliveryStatusIcon status={message.status} size="xs" />}
           </span>
         </div>
       )}
@@ -178,8 +231,9 @@ export function MessageItem({ message, onReplySelect, isConsecutive = false }: M
               </span>
             )}
 
-            <span className="text-[10px] text-slate-500 font-mono" suppressHydrationWarning>
-              {formatTimestamp(message.createdAt)}
+            <span className="text-[10px] text-slate-500 font-mono flex items-center gap-1" suppressHydrationWarning>
+              <span>{formatTimestamp(message.createdAt)}</span>
+              {isMe && <DeliveryStatusIcon status={message.status} />}
             </span>
 
             {message.isEdited && (
@@ -242,8 +296,17 @@ export function MessageItem({ message, onReplySelect, isConsecutive = false }: M
             ) : (message.messageType === 'FILE' || message.messageType === 'IMAGE' || message.attachmentData) && message.attachmentData ? (
               <div className="my-1.5 space-y-1.5">
                 {message.content && !message.content.startsWith('Uploaded file: ') && (
-                  <p className="text-xs sm:text-sm text-slate-200 leading-relaxed break-words whitespace-pre-wrap selection:bg-indigo-500/30">
+                  <p
+                    className={`text-xs sm:text-sm text-slate-200 leading-relaxed break-words whitespace-pre-wrap selection:bg-indigo-500/30 transition-opacity ${
+                      message.status === 'sending' ? 'opacity-80' : 'opacity-100'
+                    }`}
+                  >
                     {message.content}
+                    {isConsecutive && isMe && (
+                      <span className="inline-flex items-center ml-1.5 align-middle">
+                        <DeliveryStatusIcon status={message.status} size="xs" />
+                      </span>
+                    )}
                     {isConsecutive && message.isEdited && (
                       <span className="text-[10px] text-slate-500 italic ml-1.5">
                         (edited)
@@ -254,8 +317,17 @@ export function MessageItem({ message, onReplySelect, isConsecutive = false }: M
                 <FileCard attachment={message.attachmentData} />
               </div>
             ) : (
-              <p className="text-xs sm:text-sm text-slate-200 leading-relaxed break-words whitespace-pre-wrap selection:bg-indigo-500/30">
+              <p
+                className={`text-xs sm:text-sm text-slate-200 leading-relaxed break-words whitespace-pre-wrap selection:bg-indigo-500/30 transition-opacity ${
+                  message.status === 'sending' ? 'opacity-80' : 'opacity-100'
+                }`}
+              >
                 {message.content}
+                {isConsecutive && isMe && (
+                  <span className="inline-flex items-center ml-1.5 align-middle">
+                    <DeliveryStatusIcon status={message.status} size="xs" />
+                  </span>
+                )}
                 {isConsecutive && message.isEdited && (
                   <span className="text-[10px] text-slate-500 italic ml-1.5">
                     (edited)

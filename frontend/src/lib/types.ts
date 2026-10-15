@@ -191,6 +191,7 @@ export interface Message {
   };
   isPinned?: boolean;
   isEdited?: boolean;
+  status?: 'sending' | 'sent' | 'delivered' | 'error';
   deletedAt?: string;
   createdAt: string;
   updatedAt?: string;

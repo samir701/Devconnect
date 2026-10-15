@@ -248,11 +248,35 @@ export function MessageComposer({ replyingTo, onClearReply }: MessageComposerPro
       return;
     }
 
+    // Capture values before clearing inputs immediately
+    const textToSend = text;
+    const isCodeModeToSend = isCodeMode;
+    const codeLanguageToSend = codeLanguage;
+    const codeFilenameToSend = codeFilename.trim() || undefined;
+    const replyingToToSend = replyingTo;
+    const fileToUpload = stagedFile;
+
+    // Clear composer inputs immediately so the text box never stays filled while processing
+    setText('');
+    setStagedFile(null);
+    setUploadProgress(0);
+    setUploadError(null);
+    onClearReply();
+    setSecretResult(null);
+    setPendingSend(false);
+    if (isCodeMode) {
+      setIsCodeMode(false);
+      setCodeFilename('');
+    }
+
+    if (typingTimeoutRef.current) clearTimeout(typingTimeoutRef.current);
+    if (currentUser?.name) triggerTyping(currentUser.name, false);
+
     let attachmentData: Attachment | undefined = undefined;
 
     // Handle staged file upload first if present
-    if (stagedFile) {
-      const uploaded = await uploadStagedFile(stagedFile);
+    if (fileToUpload) {
+      const uploaded = await uploadStagedFile(fileToUpload);
       if (!uploaded) {
         // Upload failed; do not send incomplete message
         return;
@@ -260,41 +284,39 @@ export function MessageComposer({ replyingTo, onClearReply }: MessageComposerPro
       attachmentData = uploaded;
     }
 
-    const ext = stagedFile?.name.split('.').pop()?.toLowerCase();
+    const ext = fileToUpload?.name.split('.').pop()?.toLowerCase();
     const isImage = ext && ['png', 'jpg', 'jpeg', 'webp', 'svg', 'gif'].includes(ext);
 
-    if (isCodeMode) {
+    if (isCodeModeToSend) {
       await sendMessage({
-        content: text,
+        content: textToSend,
         messageType: 'CODE',
-        codeLanguage,
-        codeFilename: codeFilename.trim() || undefined,
+        codeLanguage: codeLanguageToSend,
+        codeFilename: codeFilenameToSend,
         attachmentData,
-        replyToMessageId: replyingTo?.id,
-        replyToMessage: replyingTo
+        replyToMessageId: replyingToToSend?.id,
+        replyToMessage: replyingToToSend
           ? {
-              id: replyingTo.id,
-              senderName: replyingTo.sender?.name || 'Developer',
-              content: replyingTo.content.slice(0, 100),
+              id: replyingToToSend.id,
+              senderName: replyingToToSend.sender?.name || 'Developer',
+              content: replyingToToSend.content.slice(0, 100),
             }
           : undefined,
       });
-      setIsCodeMode(false);
-      setCodeFilename('');
     } else {
       const msgType = attachmentData ? (isImage ? 'IMAGE' : 'FILE') : 'TEXT';
-      const contentToSend = text.trim() || (stagedFile ? `Uploaded file: ${stagedFile.name}` : '');
+      const contentToSend = textToSend.trim() || (fileToUpload ? `Uploaded file: ${fileToUpload.name}` : '');
 
       await sendMessage({
         content: contentToSend,
         messageType: msgType,
         attachmentData,
-        replyToMessageId: replyingTo?.id,
-        replyToMessage: replyingTo
+        replyToMessageId: replyingToToSend?.id,
+        replyToMessage: replyingToToSend
           ? {
-              id: replyingTo.id,
-              senderName: replyingTo.sender?.name || 'Developer',
-              content: replyingTo.content.slice(0, 100),
+              id: replyingToToSend.id,
+              senderName: replyingToToSend.sender?.name || 'Developer',
+              content: replyingToToSend.content.slice(0, 100),
             }
           : undefined,
       });
@@ -305,17 +327,6 @@ export function MessageComposer({ replyingTo, onClearReply }: MessageComposerPro
         } catch {}
       }
     }
-
-    if (typingTimeoutRef.current) clearTimeout(typingTimeoutRef.current);
-    if (currentUser?.name) triggerTyping(currentUser.name, false);
-
-    setText('');
-    setStagedFile(null);
-    setUploadProgress(0);
-    setUploadError(null);
-    onClearReply();
-    setSecretResult(null);
-    setPendingSend(false);
   };
 
   const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {

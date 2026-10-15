@@ -939,15 +939,38 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
 
       setMessages((prev) => {
         if (prev.some((m) => m.id === newMsg.id)) return prev;
-        if (doesMessageMatchView(newMsg, activeConversationRef.current, activeProjectIdRef.current, activeChannelRef.current)) {
-          const updated = [...prev, newMsg];
-          const viewKey = activeConversationRef.current
-            ? `conv_${activeConversationRef.current.id}`
-            : `proj_${activeProjectIdRef.current}_chan_${activeChannelRef.current}`;
-          setCachedMessages(viewKey, updated);
-          return updated;
+
+        // Check if there is an optimistic temporary message from this user that matches
+        const tempMatchIndex = prev.findIndex(
+          (m) =>
+            m.status === 'sending' &&
+            m.senderId === newMsg.senderId &&
+            m.content === newMsg.content
+        );
+
+        let updated: Message[];
+        if (tempMatchIndex >= 0) {
+          updated = prev.map((m, idx) =>
+            idx === tempMatchIndex ? { ...newMsg, status: 'delivered' as const } : m
+          );
+        } else if (
+          doesMessageMatchView(
+            newMsg,
+            activeConversationRef.current,
+            activeProjectIdRef.current,
+            activeChannelRef.current
+          )
+        ) {
+          updated = [...prev, { ...newMsg, status: 'delivered' as const }];
+        } else {
+          return prev;
         }
-        return prev;
+
+        const viewKey = activeConversationRef.current
+          ? `conv_${activeConversationRef.current.id}`
+          : `proj_${activeProjectIdRef.current}_chan_${activeChannelRef.current}`;
+        setCachedMessages(viewKey, updated);
+        return updated;
       });
 
       // If message involves a task, bug, or file, trigger active view refresh
@@ -1291,19 +1314,76 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     replyToMessageId?: string;
     replyToMessage?: { id: string; senderName: string; content: string };
   }) => {
+    if (!currentUser) {
+      setIsAuthModalOpen(true);
+      return;
+    }
+
+    const socket = socketRef.current;
+    const roomPayload = activeConversation
+      ? { conversationId: activeConversation.id }
+      : activeProjectId
+      ? { projectId: activeProjectId, channel: activeChannel || 'general' }
+      : {};
+
+    const tempId = `temp_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
+    const nowIso = new Date().toISOString();
+
+    const optimisticMsg: Message = {
+      id: tempId,
+      projectId: activeConversation ? undefined : (activeProjectId || undefined),
+      conversationId: activeConversation ? activeConversation.id : undefined,
+      channel: activeConversation ? undefined : (activeChannel || 'general'),
+      senderId: currentUser.id,
+      sender: currentUser,
+      messageType: payload.messageType || 'TEXT',
+      content: payload.content,
+      metadata: payload.metadata,
+      codeLanguage: payload.codeLanguage,
+      codeFilename: payload.codeFilename,
+      bugData: payload.bugData as Bug | undefined,
+      taskData: payload.taskData as Task | undefined,
+      attachmentData: payload.attachmentData as Attachment | undefined,
+      replyToMessageId: payload.replyToMessageId,
+      replyToMessage: payload.replyToMessage,
+      status: 'sending',
+      createdAt: nowIso,
+    };
+
+    // 1. Immediately place optimistic message into chat state & cache so it appears instantly
+    setMessages((prev) => {
+      const updated = [...prev, optimisticMsg];
+      const viewKey = activeConversation
+        ? `conv_${activeConversation.id}`
+        : `proj_${activeProjectId}_chan_${activeChannel}`;
+      setCachedMessages(viewKey, updated);
+      return updated;
+    });
+
+    // 2. Reorder conversations immediately to bring active conversation to the top
+    if (activeConversation) {
+      setConversations((prev) => {
+        const normTarget = activeConversation.id.replace('dm_', '').split('_').sort().join('_');
+        const matchIndex = prev.findIndex(
+          (c) =>
+            c.id === activeConversation.id ||
+            c.id.replace('dm_', '').split('_').sort().join('_') === normTarget
+        );
+        if (matchIndex >= 0) {
+          const matched: DirectConversation = {
+            ...prev[matchIndex],
+            lastMessage: payload.content || 'Sent an attachment',
+            lastActivity: nowIso,
+            unreadCount: 0,
+          };
+          const remaining = prev.filter((_, idx) => idx !== matchIndex);
+          return [matched, ...remaining];
+        }
+        return prev;
+      });
+    }
+
     try {
-      const socket = socketRef.current;
-      const roomPayload = activeConversation
-        ? { conversationId: activeConversation.id }
-        : activeProjectId
-        ? { projectId: activeProjectId, channel: activeChannel || 'general' }
-        : {};
-
-      if (!currentUser) {
-        setIsAuthModalOpen(true);
-        return;
-      }
-
       const res = await fetch('/api/messages', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -1318,44 +1398,26 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
 
       if (res.ok) {
         const data = await res.json();
-        const createdMsg = data.message;
+        const createdMsg: Message = { ...data.message, status: 'delivered' };
 
-        // Add to local state immediately if channel/conv matches or is auto-grouped
+        // Replace temporary optimistic message with confirmed delivered message
         setMessages((prev) => {
-          if (prev.some((m) => m.id === createdMsg.id)) return prev;
-          if (doesMessageMatchView(createdMsg, activeConversation, activeProjectId, activeChannel)) {
-            const updated = [...prev, createdMsg];
-            const viewKey = activeConversation
-              ? `conv_${activeConversation.id}`
-              : `proj_${activeProjectId}_chan_${activeChannel}`;
-            setCachedMessages(viewKey, updated);
-            return updated;
+          const hasTemp = prev.some((m) => m.id === tempId);
+          const hasReal = prev.some((m) => m.id === createdMsg.id);
+          let updated: Message[];
+          if (hasTemp) {
+            updated = prev.map((m) => (m.id === tempId ? createdMsg : m));
+          } else if (!hasReal) {
+            updated = [...prev, createdMsg];
+          } else {
+            updated = prev;
           }
-          return prev;
+          const viewKey = activeConversation
+            ? `conv_${activeConversation.id}`
+            : `proj_${activeProjectId}_chan_${activeChannel}`;
+          setCachedMessages(viewKey, updated);
+          return updated;
         });
-
-        // Reorder conversations immediately to bring active conversation to the top
-        if (activeConversation) {
-          setConversations((prev) => {
-            const normTarget = activeConversation.id.replace('dm_', '').split('_').sort().join('_');
-            const matchIndex = prev.findIndex(
-              (c) =>
-                c.id === activeConversation.id ||
-                c.id.replace('dm_', '').split('_').sort().join('_') === normTarget
-            );
-            if (matchIndex >= 0) {
-              const matched: DirectConversation = {
-                ...prev[matchIndex],
-                lastMessage: createdMsg.content || 'Sent an attachment',
-                lastActivity: createdMsg.createdAt || new Date().toISOString(),
-                unreadCount: 0,
-              };
-              const remaining = prev.filter((_, idx) => idx !== matchIndex);
-              return [matched, ...remaining];
-            }
-            return prev;
-          });
-        }
 
         // Broadcast to all other windows/tabs in the room via socket
         if (socket && socket.connected) {
@@ -1368,9 +1430,18 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         if (payload.messageType === 'TASK' || payload.messageType === 'BUG' || payload.messageType === 'FILE') {
           fetchActiveDetails();
         }
+      } else {
+        // Mark optimistic message with error status
+        setMessages((prev) =>
+          prev.map((m) => (m.id === tempId ? { ...m, status: 'error' as const } : m))
+        );
       }
     } catch (err) {
       console.error('Failed to send message:', err);
+      // Mark optimistic message with error status
+      setMessages((prev) =>
+        prev.map((m) => (m.id === tempId ? { ...m, status: 'error' as const } : m))
+      );
     }
   };
 
