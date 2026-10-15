@@ -23,6 +23,7 @@ import {
   AppNotification,
   NotificationPreferences,
 } from './types';
+import { extractParticipantIds, normalizeConversationId } from './conversation';
 
 export interface ToastNotification {
   id: string;
@@ -209,9 +210,19 @@ export const doesMessageMatchView = (
   if (currentConv) {
     if (!msg.conversationId) return false;
     if (msg.conversationId === currentConv.id) return true;
-    const partsTarget = currentConv.id.replace('dm_', '').split('_').sort().join('_');
-    const partsMsg = (msg.conversationId || '').replace('dm_', '').split('_').sort().join('_');
-    return partsTarget.length > 0 && partsTarget === partsMsg;
+    const targetNorm = normalizeConversationId(currentConv.id);
+    const msgNorm = normalizeConversationId(msg.conversationId);
+    if (targetNorm && msgNorm && targetNorm === msgNorm) return true;
+    if (currentConv.participantIds && currentConv.participantIds.length === 2) {
+      const [p1, p2] = currentConv.participantIds;
+      if (
+        (msg.senderId === p1 || msg.senderId === p2) &&
+        (msg.recipientId === p1 || msg.recipientId === p2)
+      ) {
+        return true;
+      }
+    }
+    return false;
   }
 
   // 2. Project Channel View: direct messages MUST NOT appear in project channels!
@@ -239,9 +250,9 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       if (localStorage.getItem('devconnect_active_conv_id')) {
         return null;
       }
-      return localStorage.getItem('devconnect_active_project') || 'proj_ai_employee';
+      return localStorage.getItem('devconnect_active_project') || null;
     }
-    return 'proj_ai_employee';
+    return null;
   });
   const [activeChannel, setActiveChannel] = useState<string>('general');
   const [activeConversation, setActiveConversation] = useState<DirectConversation | null>(null);
@@ -381,10 +392,11 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       }
 
       // 2. Projects
+      let newProjects: Project[] = [];
       const projRes = await fetch('/api/projects');
       if (projRes.ok) {
         const pData = await projRes.json();
-        const newProjects: Project[] = pData.projects || [];
+        newProjects = pData.projects || [];
         setProjects((prev) => {
           if (prev.length === newProjects.length) {
             let same = true;
@@ -403,6 +415,16 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
           }
           return newProjects;
         });
+
+        // Tell socket to join all project rooms for this user
+        if (socketRef.current && socketRef.current.connected && newProjects.length > 0) {
+          socketRef.current.emit('join_projects', { projectIds: newProjects.map((p) => p.id) });
+        }
+
+        // If user currently has activeProjectId but is not part of that project, reset it
+        if (activeProjectIdRef.current && !newProjects.some((p) => p.id === activeProjectIdRef.current)) {
+          setActiveProjectId(newProjects.length > 0 ? newProjects[0].id : null);
+        }
       }
 
       // 3. Registered users for team selection and DMs
@@ -475,7 +497,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
             return merged;
           });
 
-          // Auto-restore active conversation if previously selected on initial mount
+          // Auto-restore active conversation or default to first peer if 0 projects assigned
           if (!isBackground) {
             const savedConvId = getStorageItem('devconnect_active_conv_id');
             if (savedConvId) {
@@ -483,6 +505,8 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
               if (match) {
                 setActiveConversation(match);
               }
+            } else if (newProjects.length === 0 && convList.length > 0 && !activeProjectIdRef.current) {
+              setActiveConversation(convList[0]);
             }
           }
         }
@@ -846,6 +870,9 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       if (roomPayload) {
         socket.emit('join_conversation', roomPayload);
       }
+      if (projectsRef.current && projectsRef.current.length > 0) {
+        socket.emit('join_projects', { projectIds: projectsRef.current.map((p) => p.id) });
+      }
     });
 
     socket.on('disconnect', () => {
@@ -867,18 +894,18 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         let updatedConv: DirectConversation | undefined;
 
         setConversations((prev) => {
-          const normTarget = newMsg.conversationId?.replace('dm_', '').split('_').sort().join('_');
+          const normTarget = normalizeConversationId(newMsg.conversationId);
           const matchIndex = prev.findIndex(
             (c) =>
               c.id === newMsg.conversationId ||
-              c.id.replace('dm_', '').split('_').sort().join('_') === normTarget
+              normalizeConversationId(c.id) === normTarget
           );
 
           if (matchIndex >= 0) {
             const matched = prev[matchIndex];
             const isCurrentActive =
               activeConversationRef.current?.id === matched.id ||
-              activeConversationRef.current?.id.replace('dm_', '').split('_').sort().join('_') === normTarget;
+              normalizeConversationId(activeConversationRef.current?.id) === normTarget;
 
             const updated: DirectConversation = {
               ...matched,
@@ -897,9 +924,10 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
                 : usersRef.current.find((u) => u.id === newMsg.senderId);
 
             if (otherUser) {
+              const myId = currentUserRef.current?.id || '';
               const updated: DirectConversation = {
-                id: newMsg.conversationId || `dm_${otherUser.id}`,
-                participantIds: [currentUserRef.current?.id || '', otherUser.id],
+                id: newMsg.conversationId || [myId, otherUser.id].sort().join('_'),
+                participantIds: [myId, otherUser.id],
                 otherUser,
                 lastMessage: newMsg.content || 'Sent an attachment',
                 lastActivity: newMsg.createdAt || new Date().toISOString(),
@@ -1227,7 +1255,34 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     });
 
     // 9. Realtime Project Member Triggers (Member added or removed)
-    socket.on('member_added', (payload: { projectId?: string }) => {
+    socket.on('member_added', (payload: { projectId?: string; userId?: string; member?: ProjectMember }) => {
+      const isMe = payload?.userId === currentUserRef.current?.id;
+      if (isMe && payload?.projectId) {
+        // Current user was just added to a project by a peer!
+        if (socketRef.current && socketRef.current.connected) {
+          socketRef.current.emit('join_conversation', { projectId: payload.projectId, channel: 'general' });
+        }
+        triggerToast({
+          title: 'Added to Project Group! 🎉',
+          message: 'A peer has added you to a project group. Your workspace has been updated in real time.',
+          type: 'GROUP_MESSAGE',
+          projectId: payload.projectId,
+        });
+        refreshData(true).then(() => {
+          if (!activeProjectIdRef.current && !activeConversationRef.current) {
+            selectProject(payload.projectId!);
+          }
+        });
+      } else {
+        if (!payload?.projectId || activeProjectIdRef.current === payload.projectId) {
+          fetchActiveDetails(true);
+        }
+        refreshData(true);
+      }
+      setLastSyncedAt(new Date());
+    });
+
+    socket.on('member_removed', (payload: { projectId?: string; userId?: string }) => {
       if (!payload?.projectId || activeProjectIdRef.current === payload.projectId) {
         fetchActiveDetails(true);
       }
@@ -1235,15 +1290,51 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       setLastSyncedAt(new Date());
     });
 
-    socket.on('member_removed', (payload: { projectId?: string }) => {
-      if (!payload?.projectId || activeProjectIdRef.current === payload.projectId) {
-        fetchActiveDetails(true);
+    // 10. Realtime User Registration / Presence Trigger
+    socket.on('user_joined', (payload: { user?: User }) => {
+      if (payload?.user && payload.user.id !== currentUserRef.current?.id) {
+        const newUser = payload.user;
+        setUsers((prev) => {
+          if (prev.some((u) => u.id === newUser.id)) return prev;
+          return [...prev, newUser];
+        });
+        setConversations((prev) => {
+          if (prev.some((c) => c.otherUser?.id === newUser.id)) return prev;
+          const myId = currentUserRef.current?.id || '';
+          const newConv: DirectConversation = {
+            id: [myId, newUser.id].sort().join('_'),
+            participantIds: [myId, newUser.id],
+            otherUser: newUser,
+            lastMessage: `Direct conversation with ${newUser.name}`,
+            lastActivity: 'Just now',
+            unreadCount: 0,
+          };
+          return [...prev, newConv];
+        });
+        triggerToast({
+          title: `${newUser.name} joined Devconnect`,
+          message: 'Direct messaging is now available with this developer.',
+          type: 'DIRECT_MESSAGE',
+          sender: newUser,
+        });
       }
-      refreshData(true);
-      setLastSyncedAt(new Date());
     });
 
-    // 10. Realtime Global Workspace Sync Trigger
+    socket.on('presence_updated', (payload: { userId: string; status: 'ONLINE' | 'AWAY' | 'OFFLINE' }) => {
+      if (!payload?.userId) return;
+      setUsers((prev) =>
+        prev.map((u) => (u.id === payload.userId ? { ...u, status: payload.status } : u))
+      );
+      setConversations((prev) =>
+        prev.map((c) =>
+          c.otherUser?.id === payload.userId
+            ? { ...c, otherUser: { ...c.otherUser, status: payload.status } }
+            : c
+        )
+      );
+    });
+
+    // 11. Realtime Global Workspace Sync Trigger
     socket.on('workspace_sync', () => {
       fetchActiveDetails(true);
       refreshData(true);
@@ -1333,11 +1424,13 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     setIsMobileSidebarOpen(false);
     setStorageItem('devconnect_active_channel', ch);
     if (typeof window !== 'undefined') localStorage.removeItem('devconnect_active_conv_id');
-    const pId = activeProjectId || 'proj_ai_employee';
-    if (!activeProjectId) setActiveProjectId(pId);
-    const key = `proj_${pId}_chan_${ch}`;
-    const cached = getCachedMessages(key);
-    setMessages(cached || []);
+    const pId = activeProjectId || (projects.length > 0 ? projects[0].id : null);
+    if (pId && !activeProjectId) setActiveProjectId(pId);
+    if (pId) {
+      const key = `proj_${pId}_chan_${ch}`;
+      const cached = getCachedMessages(key);
+      setMessages(cached || []);
+    }
   };
 
   const selectConversation = (conv: DirectConversation) => {
@@ -1416,11 +1509,11 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     // 2. Reorder conversations immediately to bring active conversation to the top
     if (activeConversation) {
       setConversations((prev) => {
-        const normTarget = activeConversation.id.replace('dm_', '').split('_').sort().join('_');
+        const normTarget = normalizeConversationId(activeConversation.id);
         const matchIndex = prev.findIndex(
           (c) =>
             c.id === activeConversation.id ||
-            c.id.replace('dm_', '').split('_').sort().join('_') === normTarget
+            normalizeConversationId(c.id) === normTarget
         );
         if (matchIndex >= 0) {
           const matched: DirectConversation = {

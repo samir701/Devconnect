@@ -132,7 +132,12 @@ export function Sidebar() {
             </div>
 
             <div className="space-y-1">
-              {projects.map((proj) => {
+              {projects.length === 0 ? (
+                <div className="px-2.5 py-2 text-[11px] text-slate-500 italic">
+                  No groups assigned yet. Wait for a peer invite or click + Add.
+                </div>
+              ) : (
+                projects.map((proj) => {
                 const isActive = activeProjectId === proj.id && !activeConversation;
                 return (
                   <div key={proj.id} className="space-y-0.5">
@@ -223,7 +228,7 @@ export function Sidebar() {
                     )}
                   </div>
                 );
-              })}
+              }))}
             </div>
           </div>
 

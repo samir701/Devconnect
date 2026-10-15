@@ -15,6 +15,7 @@ import { createNotification, getUserNotificationPreferences } from '@/lib/notifi
 import { sendMentionEmail, sendTaskAssignedEmail } from '@/lib/email/notifications';
 import { getSessionUserId } from '@/lib/auth-guard';
 import { emitRealtimeEvent } from '@/lib/activity';
+import { extractParticipantIds } from '@/lib/conversation';
 
 
 export async function GET(request: Request) {
@@ -146,8 +147,8 @@ export async function POST(request: Request) {
     // ── Phase 6: Direct Message Notifications ─────────────────────────────────
     if (body.conversationId && senderId) {
       try {
-        const parts = body.conversationId.replace('dm_', '').split('_');
-        const recipientId = parts.find((p: string) => p !== senderId);
+        const parts = extractParticipantIds(body.conversationId, senderId);
+        const recipientId = body.recipientId || parts.find((p: string) => p !== senderId);
 
         if (recipientId) {
           const senderUser = await prisma.user.findUnique({
@@ -187,6 +188,13 @@ export async function POST(request: Request) {
     // ── Phase 6: Project / Channel Notifications for Team Members ───────────
     if (body.projectId && senderId) {
       try {
+        // Broadcast project message to all members in real time
+        emitRealtimeEvent('new_message', {
+          ...message,
+          projectId: body.projectId,
+          channel: body.channel || 'general',
+        }).catch(() => {});
+
         const project = await prisma.project.findUnique({
           where: { id: body.projectId },
           include: {

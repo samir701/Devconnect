@@ -1,5 +1,6 @@
 import { NextResponse } from 'next/server';
 import { registerUser } from '@/lib/auth.service';
+import { emitRealtimeEvent } from '@/lib/activity';
 
 export async function POST(request: Request) {
   try {
@@ -21,6 +22,10 @@ export async function POST(request: Request) {
     }
 
     const { user, token } = await registerUser({ name, email, password, title, skills });
+
+    // Notify all active clients in real time that a new user joined
+    emitRealtimeEvent('user_joined', { user }).catch(() => {});
+    emitRealtimeEvent('workspace_sync', { userId: user.id }).catch(() => {});
 
     const res = NextResponse.json({
       success: true,

@@ -56,32 +56,11 @@ export async function registerUser(params: {
     skills: params.skills && params.skills.length > 0 ? params.skills : ['JavaScript', 'TypeScript', 'Node.js'],
     status: 'ONLINE',
     lastSeen: 'Just now',
-    currentProjectId: 'proj_ai_employee',
+    currentProjectId: undefined,
   };
 
   // Persist to TiDB database and in-memory store
   await createUser(newUser);
-
-  // Auto-assign user to initial workspace projects as DEVELOPER in local store
-  if (globalThis.__devconnect_store) {
-    const defaultProjects = ['proj_ai_employee', 'proj_client_portal'];
-    for (const pid of defaultProjects) {
-      const alreadyMember = globalThis.__devconnect_store.members.some(
-        (m) => m.projectId === pid && m.userId === id
-      );
-      if (!alreadyMember) {
-        globalThis.__devconnect_store.members.push({
-          id: `mem_${Date.now()}_${pid}_${id}`,
-          projectId: pid,
-          userId: id,
-          role: 'DEVELOPER',
-          joinedAt: new Date().toISOString(),
-          user: newUser,
-        });
-      }
-    }
-    saveStoreToDisk();
-  }
 
   const token = `devconn_token_${Date.now()}_${id}`;
   authStore.sessions.set(token, {

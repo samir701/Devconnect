@@ -142,7 +142,7 @@ export function ChatArea() {
                 </p>
               </div>
             </div>
-          ) : (
+          ) : activeProject ? (
             /* Project Channel Header */
             <div className="flex items-center gap-2 min-w-0">
               <div className="w-7 h-7 rounded-lg bg-indigo-500/10 border border-indigo-500/20 flex items-center justify-center text-indigo-400 shrink-0">
@@ -154,29 +154,40 @@ export function ChatArea() {
                 {activeChannel}
               </span>
 
-              {activeProject && (
-                <div className="hidden sm:flex items-center gap-2 min-w-0">
-                  <span className="text-slate-600 select-none text-xs">/</span>
-                  <span className="text-xs font-medium text-slate-400 truncate max-w-[160px] xl:max-w-none">
-                    {activeProject.name}
-                  </span>
+              <div className="hidden sm:flex items-center gap-2 min-w-0">
+                <span className="text-slate-600 select-none text-xs">/</span>
+                <span className="text-xs font-medium text-slate-400 truncate max-w-[160px] xl:max-w-none">
+                  {activeProject.name}
+                </span>
 
-                  {activeProject.githubRepo && (
-                    <a
-                      href={`https://github.com/${activeProject.githubRepo}`}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      className="hidden md:inline-flex items-center gap-1.5 text-[11px] font-mono text-slate-400 hover:text-white bg-white/[0.04] hover:bg-white/[0.08] px-2 py-0.5 rounded-md border border-white/10 transition-colors shrink-0"
-                      title={`GitHub: ${activeProject.githubRepo}`}
-                    >
-                      <GithubIcon className="w-3 h-3 text-slate-300" />
-                      <span className="truncate max-w-[120px]">
-                        {activeProject.githubRepo.split('/')[1] || activeProject.githubRepo}
-                      </span>
-                    </a>
-                  )}
-                </div>
-              )}
+                {activeProject.githubRepo && (
+                  <a
+                    href={`https://github.com/${activeProject.githubRepo}`}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="hidden md:inline-flex items-center gap-1.5 text-[11px] font-mono text-slate-400 hover:text-white bg-white/[0.04] hover:bg-white/[0.08] px-2 py-0.5 rounded-md border border-white/10 transition-colors shrink-0"
+                    title={`GitHub: ${activeProject.githubRepo}`}
+                  >
+                    <GithubIcon className="w-3 h-3 text-slate-300" />
+                    <span className="truncate max-w-[120px]">
+                      {activeProject.githubRepo.split('/')[1] || activeProject.githubRepo}
+                    </span>
+                  </a>
+                )}
+              </div>
+            </div>
+          ) : (
+            /* No project assigned yet / Direct Workspace Header */
+            <div className="flex items-center gap-2 min-w-0">
+              <div className="w-7 h-7 rounded-lg bg-cyan-500/10 border border-cyan-500/20 flex items-center justify-center text-cyan-400 shrink-0">
+                <Users className="w-4 h-4" />
+              </div>
+              <span className="font-semibold text-sm text-white tracking-tight">
+                Direct Workspace
+              </span>
+              <span className="text-[11px] text-slate-400 hidden sm:inline">
+                • Select a peer to chat
+              </span>
             </div>
           )}
         </div>
@@ -353,17 +364,21 @@ export function ChatArea() {
         {/* Welcome / Channel Banner */}
         <div className="px-4 py-6 mb-4 rounded-2xl bg-gradient-to-b from-white/[0.03] to-transparent border border-white/5 text-center">
           <div className="w-10 h-10 rounded-xl bg-indigo-600/20 border border-indigo-500/30 text-indigo-400 flex items-center justify-center mx-auto mb-2">
-            <Hash className="w-5 h-5" />
+            {activeConversation ? <Users className="w-5 h-5 text-emerald-400" /> : <Hash className="w-5 h-5" />}
           </div>
           <h2 className="text-base font-semibold text-white">
             {activeConversation
               ? `Direct Chat with ${activeConversation.otherUser?.name}`
-              : `Welcome to #${activeChannel}`}
+              : activeProject
+              ? `Welcome to #${activeChannel}`
+              : 'Direct Messages & Workspace'}
           </h2>
           <p className="text-xs text-slate-400 max-w-md mx-auto mt-1">
             {activeConversation
               ? `End-to-end developer workspace communication with ${activeConversation.otherUser?.name}. Share code, logs, and collaborate seamlessly.`
-              : `This is the start of the #${activeChannel} discussions in ${activeProject?.name || 'Devconnect'}. Developer context, tasks, and bugs stay connected here.`}
+              : activeProject
+              ? `This is the start of the #${activeChannel} discussions in ${activeProject.name}. Developer context, tasks, and bugs stay connected here.`
+              : 'Select a developer from the Direct Messages list on the left to start chatting, or wait for a peer to add you to a project group.'}
           </p>
         </div>
 

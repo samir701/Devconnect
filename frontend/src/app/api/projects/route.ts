@@ -39,7 +39,7 @@ export async function GET(request: Request) {
         orderBy: { createdAt: 'desc' },
       });
 
-      if (dbProjects && dbProjects.length > 0) {
+      if (dbProjects) {
         const formatted = dbProjects.map((p) => ({
           ...p,
           channels: p.channels ? JSON.parse(p.channels) : ['general', 'development', 'bugs', 'tasks', 'files', 'activity'],
@@ -52,9 +52,7 @@ export async function GET(request: Request) {
     }
 
     const projects = await getProjectsForUser(userId);
-    // If user has no scoped projects yet, return active projects
-    const result = projects.length > 0 ? projects : await getProjects();
-    return NextResponse.json({ projects: result });
+    return NextResponse.json({ projects });
   } catch (err: unknown) {
     const errorMsg = err instanceof Error ? err.message : 'Failed to fetch projects';
     return NextResponse.json({ error: errorMsg }, { status: 500 });

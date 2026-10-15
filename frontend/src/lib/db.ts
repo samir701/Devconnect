@@ -2,6 +2,7 @@ import fs from 'fs';
 import path from 'path';
 import { connect } from '@tidbcloud/serverless';
 import { prisma } from './prisma';
+import { extractParticipantIds, normalizeConversationId } from './conversation';
 import {
   User,
   Project,
@@ -793,12 +794,13 @@ export async function getMessages(filters: {
           }
         }
       } else if (filters.conversationId) {
-        const raw = filters.conversationId.replace('dm_', '');
-        const parts = raw.split('_');
+        const parts = extractParticipantIds(filters.conversationId);
         if (parts.length === 2) {
           const [u1, u2] = parts;
           whereClause.OR = [
             { conversationId: filters.conversationId },
+            { conversationId: `${u1}_${u2}` },
+            { conversationId: `${u2}_${u1}` },
             { conversationId: `dm_${u1}_${u2}` },
             { conversationId: `dm_${u2}_${u1}` },
           ];
@@ -1027,9 +1029,9 @@ export async function getMessages(filters: {
       }
       if (filters.conversationId) {
         if (msg.conversationId === filters.conversationId) return true;
-        const targetParts = filters.conversationId.replace('dm_', '').split('_').sort().join('_');
-        const msgParts = (msg.conversationId || '').replace('dm_', '').split('_').sort().join('_');
-        return targetParts.length > 0 && targetParts === msgParts;
+        const targetNorm = normalizeConversationId(filters.conversationId);
+        const msgNorm = normalizeConversationId(msg.conversationId);
+        return targetNorm.length > 0 && targetNorm === msgNorm;
       }
       return false;
     })
@@ -2233,7 +2235,9 @@ export async function getConversations(userId: string): Promise<DirectConversati
       (m) =>
         m.conversationId === conversationId ||
         m.conversationId === `dm_${userId}_${other.id}` ||
-        m.conversationId === `dm_${other.id}_${userId}`
+        m.conversationId === `dm_${other.id}_${userId}` ||
+        m.conversationId === `${other.id}_${userId}` ||
+        (m.conversationId && normalizeConversationId(m.conversationId) === conversationId)
     );
     const lastMsg = recentMessages[recentMessages.length - 1];
 

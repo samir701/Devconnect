@@ -170,6 +170,7 @@ export interface Message {
   id: string;
   projectId?: string;
   conversationId?: string;
+  recipientId?: string;
   channel?: string;
   senderId: string;
   sender?: User;

@@ -67,6 +67,42 @@ function leaveCallRoom(socket, targetRoomId = null) {
   }
 }
 
+// Helper to extract participant user IDs reliably even when IDs contain underscores
+function extractParticipantIds(convId, knownSenderId = null) {
+  if (!convId) return [];
+  const clean = convId.startsWith('dm_') ? convId.slice(3) : convId;
+
+  if (knownSenderId) {
+    if (clean.startsWith(`${knownSenderId}_`)) {
+      return [knownSenderId, clean.slice(knownSenderId.length + 1)];
+    }
+    if (clean.endsWith(`_${knownSenderId}`)) {
+      return [clean.slice(0, clean.length - knownSenderId.length - 1), knownSenderId];
+    }
+  }
+
+  const prefixMatch = clean.match(/^((?:user|usr)_[^_]+)_((?:user|usr)_[^_]+)$/);
+  if (prefixMatch) {
+    return [prefixMatch[1], prefixMatch[2]];
+  }
+
+  const parts = clean.split('_');
+  if (parts.length === 4 && (parts[0] === 'user' || parts[0] === 'usr') && (parts[2] === 'user' || parts[2] === 'usr')) {
+    return [`${parts[0]}_${parts[1]}`, `${parts[2]}_${parts[3]}`];
+  }
+
+  if (parts.length === 2) {
+    return parts;
+  }
+
+  const midUser = clean.indexOf('_user_');
+  if (midUser > 0) return [clean.slice(0, midUser), clean.slice(midUser + 1)];
+  const midUsr = clean.indexOf('_usr_');
+  if (midUsr > 0) return [clean.slice(0, midUsr), clean.slice(midUsr + 1)];
+
+  return parts;
+}
+
 // Helper to resolve room name for direct conversations, channels, or custom rooms
 function getRoomName(payload) {
   if (!payload) return null;
@@ -152,6 +188,33 @@ const server = http.createServer((req, res) => {
           return;
         }
 
+        if (eventName === 'member_added' && payload.userId && io) {
+          io.to(`user:${payload.userId}`).emit('member_added', payload);
+        }
+
+        if (eventName === 'new_message' && io) {
+          const convId = payload.conversationId;
+          if (convId) {
+            const pIds = extractParticipantIds(convId, payload.senderId);
+            for (const pId of pIds) {
+              if (pId) io.to(`user:${pId}`).emit('new_message', payload);
+            }
+            if (pIds.length === 2) {
+              io.to(`conv:${pIds[0]}_${pIds[1]}`).emit('new_message', payload);
+              io.to(`conv:${pIds[1]}_${pIds[0]}`).emit('new_message', payload);
+              io.to(`conv:dm_${pIds[0]}_${pIds[1]}`).emit('new_message', payload);
+              io.to(`conv:dm_${pIds[1]}_${pIds[0]}`).emit('new_message', payload);
+            }
+          }
+          if (payload.recipientId) {
+            io.to(`user:${payload.recipientId}`).emit('new_message', payload);
+          }
+          if (payload.projectId) {
+            io.to(`project:${payload.projectId}`).emit('new_message', payload);
+            io.to(`channel:${payload.projectId}:${payload.channel || 'general'}`).emit('new_message', payload);
+          }
+        }
+
         const roomName = getRoomName(payload);
         if (io) {
           // Broadcast to specific room, project channels, and globally
@@ -217,10 +280,28 @@ io.on('connection', (socket) => {
     const roomName = getRoomName(payload);
     if (!roomName) return;
     socket.join(roomName);
+    if (payload.conversationId) {
+      const pIds = extractParticipantIds(payload.conversationId, userId);
+      if (pIds.length === 2) {
+        socket.join(`conv:${pIds[0]}_${pIds[1]}`);
+        socket.join(`conv:${pIds[1]}_${pIds[0]}`);
+        socket.join(`conv:dm_${pIds[0]}_${pIds[1]}`);
+        socket.join(`conv:dm_${pIds[1]}_${pIds[0]}`);
+      }
+    }
     if (payload.projectId) {
       socket.join(`project:${payload.projectId}`);
     }
     socket.emit('joined_conversation', { roomName, ...payload });
+  });
+
+  // Join all project rooms for this user
+  socket.on('join_projects', (payload) => {
+    if (Array.isArray(payload?.projectIds)) {
+      for (const pId of payload.projectIds) {
+        if (pId) socket.join(`project:${pId}`);
+      }
+    }
   });
 
   // 2. Leave Room
@@ -323,9 +404,17 @@ function persistMessageToLocalStore(msg) {
     // If direct message, also deliver to participants' personal channels for instant reception
     const convId = payload.conversationId || createdMessage.conversationId;
     if (convId) {
-      const pIds = convId.replace('dm_', '').split('_');
+      const pIds = extractParticipantIds(convId, payload.senderId || createdMessage.senderId);
       for (const pId of pIds) {
-        io.to(`user:${pId}`).emit('new_message', createdMessage);
+        if (pId) {
+          io.to(`user:${pId}`).emit('new_message', createdMessage);
+        }
+      }
+      if (pIds.length === 2) {
+        io.to(`conv:${pIds[0]}_${pIds[1]}`).emit('new_message', createdMessage);
+        io.to(`conv:${pIds[1]}_${pIds[0]}`).emit('new_message', createdMessage);
+        io.to(`conv:dm_${pIds[0]}_${pIds[1]}`).emit('new_message', createdMessage);
+        io.to(`conv:dm_${pIds[1]}_${pIds[0]}`).emit('new_message', createdMessage);
       }
     }
 
